@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.IO;
 using System.Text.Encodings.Web;
 using System.Text.Json;
@@ -11,10 +12,14 @@ using Microsoft.Win32;
 namespace MarkdownViewer;
 
 public partial class MainWindow : Window {
+  private const string VirtualHostName = "markdown.local";
+  private const string VirtualHostBaseUri = "https://markdown.local/";
+
   private readonly SettingRepository settingRepository = new();
   private readonly ObservableCollection<HistoryItem> historyItems = [];
   private string? currentMarkdownPath;
   private bool suppressHistorySelectionChanged;
+  private bool webViewEventsRegistered;
 
   public MainWindow(string? initialFilePath) {
     InitializeComponent();
@@ -35,6 +40,8 @@ public partial class MainWindow : Window {
       return;
     }
 
+    RegisterWebViewEvents();
+
     if (currentMarkdownPath is null) {
       if (TryOpenLatestHistory()) {
         return;
@@ -49,6 +56,49 @@ public partial class MainWindow : Window {
     }
 
     await RenderMarkdownFileAsync(currentMarkdownPath);
+  }
+
+  private void RegisterWebViewEvents() {
+    if (webViewEventsRegistered || MarkdownWebView.CoreWebView2 is null) {
+      return;
+    }
+
+    MarkdownWebView.CoreWebView2.NavigationStarting += CoreWebView2_NavigationStarting;
+    MarkdownWebView.CoreWebView2.NewWindowRequested += CoreWebView2_NewWindowRequested;
+    webViewEventsRegistered = true;
+  }
+
+  private void CoreWebView2_NavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs e) {
+    if (TryOpenExternalUrl(e.Uri)) {
+      e.Cancel = true;
+    }
+  }
+
+  private void CoreWebView2_NewWindowRequested(object? sender, CoreWebView2NewWindowRequestedEventArgs e) {
+    if (TryOpenExternalUrl(e.Uri)) {
+      e.Handled = true;
+    }
+  }
+
+  private static bool TryOpenExternalUrl(string? url) {
+    if (string.IsNullOrWhiteSpace(url) || !Uri.TryCreate(url, UriKind.Absolute, out var uri)) {
+      return false;
+    }
+
+    if (uri.Scheme is not ("http" or "https")) {
+      return false;
+    }
+
+    if (string.Equals(uri.Host, VirtualHostName, StringComparison.OrdinalIgnoreCase)) {
+      return false;
+    }
+
+    try {
+      Process.Start(new ProcessStartInfo(uri.AbsoluteUri) { UseShellExecute = true });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private bool TryOpenLatestHistory() {
@@ -105,10 +155,10 @@ public partial class MainWindow : Window {
       return;
     }
 
-    OpenMarkdownFile(selected.FullPath);
+    OpenMarkdownFile(selected.FullPath, updateHistory: false);
   }
 
-  private async void OpenMarkdownFile(string filePath) {
+  private async void OpenMarkdownFile(string filePath, bool updateHistory = true) {
     var fullPath = Path.GetFullPath(filePath);
 
     if (!File.Exists(fullPath)) {
@@ -122,7 +172,9 @@ public partial class MainWindow : Window {
       return;
     }
 
-    AddOrMoveHistory(fullPath);
+    if (updateHistory) {
+      AddOrMoveHistory(fullPath);
+    }
     currentMarkdownPath = fullPath;
 
     if (MarkdownWebView.CoreWebView2 is null) {
@@ -150,9 +202,9 @@ public partial class MainWindow : Window {
     PathTextBlock.Foreground = new SolidColorBrush(Color.FromRgb(68, 68, 68));
 
     var baseDirectory = Path.GetDirectoryName(filePath) ?? Environment.CurrentDirectory;
-    var baseUri = new Uri(Path.EndsInDirectorySeparator(baseDirectory) ? baseDirectory : baseDirectory + Path.DirectorySeparatorChar).AbsoluteUri;
+    ConfigureVirtualHostMapping(baseDirectory);
 
-    var html = BuildHtml(markdownText, baseUri, Path.GetFileName(filePath));
+    var html = BuildHtml(markdownText, VirtualHostBaseUri, Path.GetFileName(filePath));
     MarkdownWebView.NavigateToString(html);
 
     SelectHistoryItem(filePath);
@@ -284,6 +336,23 @@ p { color: #555; }
       const html = marked.parse(markdown);
       document.getElementById('main').innerHTML = html;
 
+      const isAbsoluteUrl = (value) => /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(value) || value.startsWith('//');
+      const toAbsoluteUrl = (value) => {
+        if (!value || isAbsoluteUrl(value) || value.startsWith('#')) {
+          return value;
+        }
+
+        try {
+          return new URL(value, baseUri).href;
+        } catch {
+          return value;
+        }
+      };
+
+      for (const image of document.querySelectorAll('img[src]')) {
+        image.src = toAbsoluteUrl(image.getAttribute('src') || '');
+      }
+
       Prism.highlightAll();
       mermaid.initialize({ securityLevel: 'loose', theme: 'neutral' });
       mermaid.init(undefined, document.querySelectorAll('pre.language-mermaid'));
@@ -292,6 +361,18 @@ p { color: #555; }
 </body>
 </html>
 """;
+  }
+
+  private void ConfigureVirtualHostMapping(string folderPath) {
+    if (MarkdownWebView.CoreWebView2 is null) {
+      return;
+    }
+
+    var fullFolderPath = Path.GetFullPath(folderPath);
+    MarkdownWebView.CoreWebView2.SetVirtualHostNameToFolderMapping(
+      VirtualHostName,
+      fullFolderPath,
+      CoreWebView2HostResourceAccessKind.Allow);
   }
 
   private void AddOrMoveHistory(string fullPath) {
