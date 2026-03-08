@@ -22,6 +22,7 @@ public partial class MainWindow : Window {
   private readonly SettingRepository settingRepository = new();
   private readonly ObservableCollection<HistoryItem> historyItems = [];
   private string? currentMarkdownPath;
+  private string currentSourceText = string.Empty;
   private bool isUnsafeHtmlEnabled;
   private bool suppressHistorySelectionChanged;
   private bool webViewEventsRegistered;
@@ -32,12 +33,20 @@ public partial class MainWindow : Window {
     AddOnly
   }
 
+  private enum ViewMode {
+    Preview,
+    Source
+  }
+
+  private ViewMode currentViewMode = ViewMode.Preview;
+
   public MainWindow(string? initialFilePath) {
     InitializeComponent();
 
     HistoryListBox.ItemsSource = historyItems;
     historyItems.CollectionChanged += HistoryItems_CollectionChanged;
     ApplySettings(settingRepository.Load());
+    ApplyViewMode();
 
     if(!string.IsNullOrWhiteSpace(initialFilePath)) {
       OpenMarkdownFile(initialFilePath, HistoryUpdateMode.AddOnly);
@@ -164,6 +173,11 @@ public partial class MainWindow : Window {
 
   private void OpenFileButton_Click(object sender, RoutedEventArgs e) {
     TryOpenMarkdownByDialog();
+  }
+
+  private void SourceViewToggleButton_Click(object sender, RoutedEventArgs e) {
+    currentViewMode = SourceViewToggleButton!.IsChecked == true ? ViewMode.Source : ViewMode.Preview;
+    ApplyViewMode();
   }
 
   private async void UnsafeHtmlToggleButton_Click(object sender, RoutedEventArgs e) {
@@ -384,6 +398,8 @@ public partial class MainWindow : Window {
       return;
     }
 
+    currentSourceText = markdownText;
+    SourceTextBox.Text = markdownText;
     currentMarkdownPath = filePath;
     PathTextBlock.Text = Path.GetFileName(filePath);
     PathTextBlock.Foreground = new SolidColorBrush(Color.FromRgb(68, 68, 68));
@@ -402,6 +418,8 @@ public partial class MainWindow : Window {
       return;
     }
 
+    currentSourceText = $"{title}{Environment.NewLine}{Environment.NewLine}{message}";
+    SourceTextBox.Text = currentSourceText;
     var safeTitle = HtmlEncoder.Default.Encode(title);
     var safeMessage = HtmlEncoder.Default.Encode(message);
 
@@ -684,6 +702,24 @@ p { color: #555; }
     UnsafeHtmlToggleButton!.ToolTip = isUnsafeHtmlEnabled
       ? "HTMLサニタイズを無効化中"
       : "HTMLサニタイズを無効化";
+  }
+
+  private void ApplyViewMode() {
+    var isSourceMode = currentViewMode == ViewMode.Source;
+    MarkdownWebView.Visibility = isSourceMode ? Visibility.Collapsed : Visibility.Visible;
+    SourceTextBox.Visibility = isSourceMode ? Visibility.Visible : Visibility.Collapsed;
+    SourceTextBox.Text = currentSourceText;
+    UpdateSourceViewToggleAppearance();
+  }
+
+  private void UpdateSourceViewToggleAppearance() {
+    var isSourceMode = currentViewMode == ViewMode.Source;
+    SourceViewIconTextBlock!.Foreground = isSourceMode
+      ? new SolidColorBrush(Color.FromRgb(11, 102, 35))
+      : new SolidColorBrush(Color.FromRgb(102, 102, 102));
+    SourceViewToggleButton!.ToolTip = isSourceMode
+      ? "プレビュー表示に戻す"
+      : "ソース表示";
   }
 
   private void SelectHistoryItem(string fullPath) {
