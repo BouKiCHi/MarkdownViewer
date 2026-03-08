@@ -68,18 +68,35 @@
                            FontSize="13"
                            Foreground="#444" />
 
-                <Button x:Name="ReloadButton"
-                        Grid.Column="2"
-                        Width="32"
-                        Height="32"
-                        Click="ReloadButton_Click"
-                        ToolTip="再読み込み">
-                    <TextBlock FontFamily="Segoe MDL2 Assets"
-                               FontSize="14"
-                               Text="&#xE72C;"
-                               HorizontalAlignment="Center"
-                               VerticalAlignment="Center" />
-                </Button>
+                <StackPanel Grid.Column="2"
+                            Orientation="Horizontal">
+                    <Button x:Name="ReloadButton"
+                            Width="32"
+                            Height="32"
+                            Margin="0,0,8,0"
+                            Click="ReloadButton_Click"
+                            ToolTip="再読み込み">
+                        <TextBlock FontFamily="Segoe MDL2 Assets"
+                                   FontSize="14"
+                                   Text="&#xE72C;"
+                                   HorizontalAlignment="Center"
+                                   VerticalAlignment="Center" />
+                    </Button>
+
+                    <ToggleButton x:Name="UnsafeHtmlToggleButton"
+                                  Width="32"
+                                  Height="32"
+                                  Click="UnsafeHtmlToggleButton_Click"
+                                  ToolTip="HTMLサニタイズを無効化">
+                        <TextBlock x:Name="UnsafeHtmlIconTextBlock"
+                                   FontFamily="Segoe MDL2 Assets"
+                                   FontSize="14"
+                                   Text="&#xE7BA;"
+                                   Foreground="#666"
+                                   HorizontalAlignment="Center"
+                                   VerticalAlignment="Center" />
+                    </ToggleButton>
+                </StackPanel>
             </Grid>
         </Border>
 

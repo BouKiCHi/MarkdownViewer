@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using System.ComponentModel;
+using System.Diagnostics.CodeAnalysis;
 using System.Diagnostics;
 using System.IO;
 using System.Text.Encodings.Web;
@@ -17,10 +18,12 @@ namespace MarkdownViewer;
 public partial class MainWindow : Window {
   private const string VirtualHostName = "markdown.local";
   private const string VirtualHostBaseUri = "https://markdown.local/";
+  private const string AssetHostName = "appassets.local";
 
   private readonly SettingRepository settingRepository = new();
   private readonly ObservableCollection<HistoryItem> historyItems = [];
   private string? currentMarkdownPath;
+  private bool isUnsafeHtmlEnabled;
   private bool suppressHistorySelectionChanged;
   private bool webViewEventsRegistered;
 
@@ -35,7 +38,7 @@ public partial class MainWindow : Window {
 
     HistoryListBox.ItemsSource = historyItems;
     historyItems.CollectionChanged += HistoryItems_CollectionChanged;
-    LoadHistory();
+    ApplySettings(settingRepository.Load());
 
     if (!string.IsNullOrWhiteSpace(initialFilePath)) {
       OpenMarkdownFile(initialFilePath, HistoryUpdateMode.AddOnly);
@@ -77,6 +80,7 @@ public partial class MainWindow : Window {
       return;
     }
 
+    ConfigureAssetHostMapping();
     MarkdownWebView.CoreWebView2.NavigationStarting += CoreWebView2_NavigationStarting;
     MarkdownWebView.CoreWebView2.NewWindowRequested += CoreWebView2_NewWindowRequested;
     webViewEventsRegistered = true;
@@ -104,6 +108,10 @@ public partial class MainWindow : Window {
     }
 
     if (string.Equals(uri.Host, VirtualHostName, StringComparison.OrdinalIgnoreCase)) {
+      return false;
+    }
+
+    if (string.Equals(uri.Host, AssetHostName, StringComparison.OrdinalIgnoreCase)) {
       return false;
     }
 
@@ -159,13 +167,22 @@ public partial class MainWindow : Window {
     TryOpenMarkdownByDialog();
   }
 
+  private async void UnsafeHtmlToggleButton_Click(object sender, RoutedEventArgs e) {
+    isUnsafeHtmlEnabled = UnsafeHtmlToggleButton!.IsChecked == true;
+    UpdateUnsafeHtmlToggleAppearance();
+
+    if (currentMarkdownPath is not null && MarkdownWebView!.CoreWebView2 is not null) {
+      await RenderMarkdownFileAsync(currentMarkdownPath);
+    }
+  }
+
   private void HistoryToggleButton_Click(object sender, RoutedEventArgs e) {
-    ApplyHistoryPaneVisibility(HistoryToggleButton.IsChecked == true);
+    ApplyHistoryPaneVisibility(HistoryToggleButton!.IsChecked == true);
     SaveHistory();
   }
 
   private void HistoryListBox_SelectionChanged(object sender, SelectionChangedEventArgs e) {
-    if (suppressHistorySelectionChanged || HistoryListBox.SelectedItem is not HistoryItem selected) {
+    if (suppressHistorySelectionChanged || HistoryListBox!.SelectedItem is not HistoryItem selected) {
       return;
     }
 
@@ -188,14 +205,15 @@ public partial class MainWindow : Window {
     e.Handled = true;
     item.Focus();
 
-    if (item.ContextMenu is not null) {
-      item.ContextMenu.PlacementTarget = item;
-      item.ContextMenu.IsOpen = true;
+    var contextMenu = item.ContextMenu;
+    if (contextMenu is not null) {
+      contextMenu.PlacementTarget = item;
+      contextMenu.IsOpen = true;
     }
   }
 
   private void OpenInExplorerMenuItem_Click(object sender, RoutedEventArgs e) {
-    if (TryGetHistoryItemFromMenuSender(sender, out var selected) is false) {
+    if (TryGetHistoryItemFromMenuSender(sender, out var selected) is false || selected is null) {
       return;
     }
 
@@ -203,7 +221,7 @@ public partial class MainWindow : Window {
   }
 
   private void OpenInNewWindowMenuItem_Click(object sender, RoutedEventArgs e) {
-    if (TryGetHistoryItemFromMenuSender(sender, out var selected) is false) {
+    if (TryGetHistoryItemFromMenuSender(sender, out var selected) is false || selected is null) {
       return;
     }
 
@@ -211,7 +229,7 @@ public partial class MainWindow : Window {
   }
 
   private void CopyPathMenuItem_Click(object sender, RoutedEventArgs e) {
-    if (TryGetHistoryItemFromMenuSender(sender, out var selected) is false) {
+    if (TryGetHistoryItemFromMenuSender(sender, out var selected) is false || selected is null) {
       return;
     }
 
@@ -219,14 +237,14 @@ public partial class MainWindow : Window {
   }
 
   private void RemoveHistoryMenuItem_Click(object sender, RoutedEventArgs e) {
-    if (TryGetHistoryItemFromMenuSender(sender, out var selected) is false) {
+    if (TryGetHistoryItemFromMenuSender(sender, out var selected) is false || selected is null) {
       return;
     }
 
     suppressHistorySelectionChanged = true;
     historyItems.Remove(selected);
 
-    if (ReferenceEquals(HistoryListBox.SelectedItem, selected)) {
+    if (ReferenceEquals(HistoryListBox!.SelectedItem, selected)) {
       HistoryListBox.SelectedItem = null;
     }
 
@@ -342,7 +360,7 @@ public partial class MainWindow : Window {
     return contextMenu;
   }
 
-  private static bool TryGetHistoryItemFromMenuSender(object sender, out HistoryItem? historyItem) {
+  private static bool TryGetHistoryItemFromMenuSender(object sender, [NotNullWhen(true)] out HistoryItem? historyItem) {
     historyItem = null;
 
     if (sender is not MenuItem menuItem || menuItem.Parent is not ContextMenu contextMenu) {
@@ -373,7 +391,7 @@ public partial class MainWindow : Window {
     var baseDirectory = Path.GetDirectoryName(filePath) ?? Environment.CurrentDirectory;
     ConfigureVirtualHostMapping(baseDirectory);
 
-    var html = BuildHtml(markdownText, VirtualHostBaseUri, Path.GetFileName(filePath));
+    var html = BuildHtml(markdownText, VirtualHostBaseUri, Path.GetFileName(filePath), isUnsafeHtmlEnabled);
     MarkdownWebView.NavigateToString(html);
 
     SelectHistoryItem(filePath);
@@ -418,20 +436,21 @@ p { color: #555; }
     await Task.CompletedTask;
   }
 
-  private static string BuildHtml(string markdownText, string baseUri, string title) {
+  private static string BuildHtml(string markdownText, string baseUri, string title, bool isUnsafeHtmlEnabled) {
     var markdownJson = JsonSerializer.Serialize(markdownText);
     var baseUriJson = JsonSerializer.Serialize(baseUri);
     var titleJson = JsonSerializer.Serialize(title);
+    var isUnsafeHtmlEnabledJson = JsonSerializer.Serialize(isUnsafeHtmlEnabled);
 
     return $$"""
 <!DOCTYPE html>
 <html lang="ja">
 <head>
   <meta charset="utf-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob: https: file:; img-src 'self' data: https: file:; style-src 'self' 'unsafe-inline' https:; script-src 'self' 'unsafe-inline' https:; font-src 'self' data: https:;">
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/github-markdown-css/5.8.1/github-markdown.min.css">
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.30.0/themes/prism-okaidia.min.css">
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.30.0/plugins/line-numbers/prism-line-numbers.min.css">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob: https://markdown.local https://appassets.local file:; img-src 'self' data: https://markdown.local file:; style-src 'self' 'unsafe-inline' https://appassets.local; script-src 'self' 'unsafe-inline' https://appassets.local; font-src 'self' data: https://appassets.local;">
+  <link rel="stylesheet" href="https://appassets.local/vendor/github-markdown-css/github-markdown.css">
+  <link rel="stylesheet" href="https://appassets.local/vendor/prism/themes/prism-okaidia.min.css">
+  <link rel="stylesheet" href="https://appassets.local/vendor/prism/plugins/line-numbers/prism-line-numbers.min.css">
   <style>
     body {
       margin: 0;
@@ -455,13 +474,14 @@ p { color: #555; }
       overflow-x: auto;
     }
   </style>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/16.2.0/lib/marked.umd.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.30.0/prism.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.30.0/components/prism-csharp.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.30.0/components/prism-typescript.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.30.0/components/prism-json.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.30.0/plugins/line-numbers/prism-line-numbers.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@mermaid-js/tiny@11.10.0/dist/mermaid.tiny.min.js"></script>
+  <script src="https://appassets.local/vendor/marked/marked.umd.js"></script>
+  <script src="https://appassets.local/vendor/dompurify.min.js"></script>
+  <script src="https://appassets.local/vendor/prism/prism.js"></script>
+  <script src="https://appassets.local/vendor/prism/components/prism-csharp.min.js"></script>
+  <script src="https://appassets.local/vendor/prism/components/prism-typescript.min.js"></script>
+  <script src="https://appassets.local/vendor/prism/components/prism-json.min.js"></script>
+  <script src="https://appassets.local/vendor/prism/plugins/line-numbers/prism-line-numbers.min.js"></script>
+  <script src="https://appassets.local/vendor/mermaid/mermaid.tiny.js"></script>
 </head>
 <body class="markdown-body">
   <main id="main"></main>
@@ -470,6 +490,7 @@ p { color: #555; }
       const markdown = {{markdownJson}};
       const baseUri = {{baseUriJson}};
       const documentTitle = {{titleJson}};
+      const isUnsafeHtmlEnabled = {{isUnsafeHtmlEnabledJson}};
 
       document.title = documentTitle;
 
@@ -503,7 +524,14 @@ p { color: #555; }
 
       marked.setOptions({ breaks: true });
       const html = marked.parse(markdown);
-      document.getElementById('main').innerHTML = html;
+      const renderedHtml = isUnsafeHtmlEnabled
+        ? html
+        : DOMPurify.sanitize(html, {
+            USE_PROFILES: { html: true },
+            ALLOW_DATA_ATTR: false,
+            ADD_ATTR: ['class', 'target', 'rel', 'aria-hidden']
+          });
+      document.getElementById('main').innerHTML = renderedHtml;
 
       const isAbsoluteUrl = (value) => /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(value) || value.startsWith('//');
       const toAbsoluteUrl = (value) => {
@@ -522,8 +550,29 @@ p { color: #555; }
         image.src = toAbsoluteUrl(image.getAttribute('src') || '');
       }
 
+      for (const sourceElement of document.querySelectorAll('source[src], source[srcset]')) {
+        const src = sourceElement.getAttribute('src');
+        if (src) {
+          sourceElement.src = toAbsoluteUrl(src);
+        }
+
+        const srcSet = sourceElement.getAttribute('srcset');
+        if (srcSet) {
+          sourceElement.srcset = srcSet
+            .split(',')
+            .map(entry => entry.trim())
+            .filter(Boolean)
+            .map(entry => {
+              const [urlPart, descriptor] = entry.split(/\s+/, 2);
+              const absoluteUrl = toAbsoluteUrl(urlPart || '');
+              return descriptor ? `${absoluteUrl} ${descriptor}` : absoluteUrl;
+            })
+            .join(', ');
+        }
+      }
+
       Prism.highlightAll();
-      mermaid.initialize({ securityLevel: 'loose', theme: 'neutral' });
+      mermaid.initialize({ securityLevel: 'strict', theme: 'neutral' });
       mermaid.init(undefined, document.querySelectorAll('pre.language-mermaid'));
     })();
   </script>
@@ -544,6 +593,18 @@ p { color: #555; }
       CoreWebView2HostResourceAccessKind.Allow);
   }
 
+  private void ConfigureAssetHostMapping() {
+    if (MarkdownWebView.CoreWebView2 is null) {
+      return;
+    }
+
+    var assetsFolderPath = Path.Combine(AppContext.BaseDirectory, "Assets");
+    MarkdownWebView.CoreWebView2.SetVirtualHostNameToFolderMapping(
+      AssetHostName,
+      assetsFolderPath,
+      CoreWebView2HostResourceAccessKind.Allow);
+  }
+
   private void UpdateHistory(string fullPath, HistoryUpdateMode historyUpdateMode) {
     var existing = historyItems.FirstOrDefault(x => string.Equals(x.FullPath, fullPath, StringComparison.OrdinalIgnoreCase));
 
@@ -561,34 +622,12 @@ p { color: #555; }
     SaveHistory();
   }
 
-  private void LoadHistory() {
-    var settings = settingRepository.Load();
-    ApplyHistoryPaneVisibility(settings.IsHistoryPaneVisible);
-
-    foreach (var path in settings.History) {
-      if (string.IsNullOrWhiteSpace(path)) {
-        continue;
-      }
-
-      var fullPath = Path.GetFullPath(path);
-      if (!File.Exists(fullPath)) {
-        continue;
-      }
-
-      if (historyItems.Any(item => string.Equals(item.FullPath, fullPath, StringComparison.OrdinalIgnoreCase))) {
-        continue;
-      }
-
-      historyItems.Add(new HistoryItem(fullPath));
-    }
-  }
-
   private void SaveHistory() {
     var localHistory = historyItems.Select(item => item.FullPath).ToList();
 
     settingRepository.Update(settings => {
       settings.History = localHistory;
-      settings.IsHistoryPaneVisible = HistoryToggleButton.IsChecked == true;
+      settings.IsHistoryPaneVisible = HistoryToggleButton!.IsChecked == true;
     });
 
     (Application.Current as App)?.RefreshAllWindowsFromSettings();
@@ -599,8 +638,10 @@ p { color: #555; }
 
     try {
       ApplyHistoryPaneVisibility(settings.IsHistoryPaneVisible);
+      UnsafeHtmlToggleButton!.IsChecked = isUnsafeHtmlEnabled;
+      UpdateUnsafeHtmlToggleAppearance();
 
-      var currentSelectionPath = (HistoryListBox.SelectedItem as HistoryItem)?.FullPath;
+      var currentSelectionPath = (HistoryListBox!.SelectedItem as HistoryItem)?.FullPath;
       var existingPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
       var orderedPaths = new List<string>();
 
@@ -631,15 +672,24 @@ p { color: #555; }
   }
 
   private void ApplyHistoryPaneVisibility(bool isVisible) {
-    HistoryToggleButton.IsChecked = isVisible;
+    HistoryToggleButton!.IsChecked = isVisible;
     HistoryColumn.Width = isVisible ? new GridLength(220) : new GridLength(0);
-    HistoryListBox.Visibility = isVisible ? Visibility.Visible : Visibility.Collapsed;
+    HistoryListBox!.Visibility = isVisible ? Visibility.Visible : Visibility.Collapsed;
+  }
+
+  private void UpdateUnsafeHtmlToggleAppearance() {
+    UnsafeHtmlIconTextBlock!.Foreground = isUnsafeHtmlEnabled
+      ? new SolidColorBrush(Color.FromRgb(194, 101, 13))
+      : new SolidColorBrush(Color.FromRgb(102, 102, 102));
+    UnsafeHtmlToggleButton!.ToolTip = isUnsafeHtmlEnabled
+      ? "HTMLサニタイズを無効化中"
+      : "HTMLサニタイズを無効化";
   }
 
   private void SelectHistoryItem(string fullPath) {
     suppressHistorySelectionChanged = true;
 
-    HistoryListBox.SelectedItem = historyItems.FirstOrDefault(x => string.Equals(x.FullPath, fullPath, StringComparison.OrdinalIgnoreCase));
+    HistoryListBox!.SelectedItem = historyItems.FirstOrDefault(x => string.Equals(x.FullPath, fullPath, StringComparison.OrdinalIgnoreCase));
 
     suppressHistorySelectionChanged = false;
   }
