@@ -96,8 +96,36 @@
                     Background="#FCFCFC">
                 <ListBox x:Name="HistoryListBox"
                          BorderThickness="0"
-                         SelectionChanged="HistoryListBox_SelectionChanged"
-                         DisplayMemberPath="DisplayName" />
+                         SelectionChanged="HistoryListBox_SelectionChanged">
+                    <ListBox.ItemContainerStyle>
+                        <Style TargetType="ListBoxItem">
+                            <Setter Property="Padding"
+                                    Value="0" />
+                            <EventSetter Event="Loaded"
+                                         Handler="HistoryListBoxItem_Loaded" />
+                            <EventSetter Event="PreviewMouseRightButtonDown"
+                                         Handler="HistoryListBoxItem_PreviewMouseRightButtonDown" />
+                        </Style>
+                    </ListBox.ItemContainerStyle>
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <StackPanel Margin="6,4">
+                                <TextBlock Text="{Binding DisplayName}"
+                                           ToolTip="{Binding FullPath}"
+                                           TextTrimming="CharacterEllipsis"
+                                           FontSize="12"
+                                           Foreground="#222" />
+                                <TextBlock Text="{Binding SecondaryText}"
+                                           ToolTip="{Binding FullPath}"
+                                           TextTrimming="CharacterEllipsis"
+                                           FontSize="10"
+                                           Foreground="#666"
+                                           Margin="0,1,0,0"
+                                           Visibility="{Binding SecondaryTextVisibility}" />
+                            </StackPanel>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
             </Border>
 
             <wv2:WebView2 x:Name="MarkdownWebView"

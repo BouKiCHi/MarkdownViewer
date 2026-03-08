@@ -1,10 +1,13 @@
 using System.Collections.ObjectModel;
+using System.Collections.Specialized;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Media;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Win32;
@@ -21,15 +24,26 @@ public partial class MainWindow : Window {
   private bool suppressHistorySelectionChanged;
   private bool webViewEventsRegistered;
 
+  private enum HistoryUpdateMode {
+    None,
+    AddOrMove,
+    AddOnly
+  }
+
   public MainWindow(string? initialFilePath) {
     InitializeComponent();
 
     HistoryListBox.ItemsSource = historyItems;
+    historyItems.CollectionChanged += HistoryItems_CollectionChanged;
     LoadHistory();
 
     if (!string.IsNullOrWhiteSpace(initialFilePath)) {
-      OpenMarkdownFile(initialFilePath);
+      OpenMarkdownFile(initialFilePath, HistoryUpdateMode.AddOnly);
     }
+  }
+
+  private void HistoryItems_CollectionChanged(object? sender, NotifyCollectionChangedEventArgs e) {
+    RefreshHistoryItemDisplayState();
   }
 
   private async void Window_Loaded(object sender, RoutedEventArgs e) {
@@ -155,10 +169,72 @@ public partial class MainWindow : Window {
       return;
     }
 
-    OpenMarkdownFile(selected.FullPath, updateHistory: false);
+    OpenMarkdownFile(selected.FullPath, HistoryUpdateMode.None);
   }
 
-  private async void OpenMarkdownFile(string filePath, bool updateHistory = true) {
+  private void HistoryListBoxItem_Loaded(object sender, RoutedEventArgs e) {
+    if (sender is not ListBoxItem item) {
+      return;
+    }
+
+    item.ContextMenu ??= BuildHistoryItemContextMenu();
+  }
+
+  private void HistoryListBoxItem_PreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e) {
+    if (sender is not ListBoxItem item) {
+      return;
+    }
+
+    e.Handled = true;
+    item.Focus();
+
+    if (item.ContextMenu is not null) {
+      item.ContextMenu.PlacementTarget = item;
+      item.ContextMenu.IsOpen = true;
+    }
+  }
+
+  private void OpenInExplorerMenuItem_Click(object sender, RoutedEventArgs e) {
+    if (TryGetHistoryItemFromMenuSender(sender, out var selected) is false) {
+      return;
+    }
+
+    OpenFileInExplorer(selected.FullPath);
+  }
+
+  private void OpenInNewWindowMenuItem_Click(object sender, RoutedEventArgs e) {
+    if (TryGetHistoryItemFromMenuSender(sender, out var selected) is false) {
+      return;
+    }
+
+    OpenFileInSeparateWindow(selected.FullPath);
+  }
+
+  private void CopyPathMenuItem_Click(object sender, RoutedEventArgs e) {
+    if (TryGetHistoryItemFromMenuSender(sender, out var selected) is false) {
+      return;
+    }
+
+    Clipboard.SetText(selected.FullPath);
+  }
+
+  private void RemoveHistoryMenuItem_Click(object sender, RoutedEventArgs e) {
+    if (TryGetHistoryItemFromMenuSender(sender, out var selected) is false) {
+      return;
+    }
+
+    suppressHistorySelectionChanged = true;
+    historyItems.Remove(selected);
+
+    if (ReferenceEquals(HistoryListBox.SelectedItem, selected)) {
+      HistoryListBox.SelectedItem = null;
+    }
+
+    suppressHistorySelectionChanged = false;
+    SaveHistory();
+  }
+
+  private async void OpenMarkdownFile(string filePath, HistoryUpdateMode historyUpdateMode = HistoryUpdateMode.AddOrMove) {
     var fullPath = Path.GetFullPath(filePath);
 
     if (!File.Exists(fullPath)) {
@@ -172,8 +248,8 @@ public partial class MainWindow : Window {
       return;
     }
 
-    if (updateHistory) {
-      AddOrMoveHistory(fullPath);
+    if (historyUpdateMode != HistoryUpdateMode.None && !string.Equals(currentMarkdownPath, fullPath, StringComparison.OrdinalIgnoreCase)) {
+      UpdateHistory(fullPath, historyUpdateMode);
     }
     currentMarkdownPath = fullPath;
 
@@ -182,6 +258,99 @@ public partial class MainWindow : Window {
     }
 
     await RenderMarkdownFileAsync(fullPath);
+  }
+
+  public void HandleActivationRequest(string? filePath) {
+    if (WindowState == WindowState.Minimized) {
+      WindowState = WindowState.Normal;
+    }
+
+    Show();
+    Activate();
+    Topmost = true;
+    Topmost = false;
+    Focus();
+
+    if (!string.IsNullOrWhiteSpace(filePath)) {
+      OpenMarkdownFile(filePath, HistoryUpdateMode.AddOnly);
+    }
+  }
+
+  private void OpenFileInExplorer(string filePath) {
+    var fullPath = Path.GetFullPath(filePath);
+    if (!File.Exists(fullPath)) {
+      var staleItem = historyItems.FirstOrDefault(x => string.Equals(x.FullPath, fullPath, StringComparison.OrdinalIgnoreCase));
+      if (staleItem is not null) {
+        historyItems.Remove(staleItem);
+        SaveHistory();
+      }
+
+      MessageBox.Show($"指定されたファイルが見つかりません。{Environment.NewLine}{fullPath}", "Markdown Viewer", MessageBoxButton.OK, MessageBoxImage.Warning);
+      return;
+    }
+
+    try {
+      Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{fullPath}\"") {
+        UseShellExecute = true
+      });
+    } catch (Exception ex) {
+      MessageBox.Show($"エクスプローラを開けませんでした。{Environment.NewLine}{ex.Message}", "Markdown Viewer", MessageBoxButton.OK, MessageBoxImage.Error);
+    }
+  }
+
+  private void OpenFileInSeparateWindow(string filePath) {
+    var fullPath = Path.GetFullPath(filePath);
+    if (!File.Exists(fullPath)) {
+      var staleItem = historyItems.FirstOrDefault(x => string.Equals(x.FullPath, fullPath, StringComparison.OrdinalIgnoreCase));
+      if (staleItem is not null) {
+        historyItems.Remove(staleItem);
+        SaveHistory();
+      }
+
+      MessageBox.Show($"指定されたファイルが見つかりません。{Environment.NewLine}{fullPath}", "Markdown Viewer", MessageBoxButton.OK, MessageBoxImage.Warning);
+      return;
+    }
+
+    try {
+      var window = new MainWindow(fullPath);
+      (Application.Current as App)?.RegisterWindow(window);
+      window.Show();
+    } catch (Exception ex) {
+      MessageBox.Show($"別ウインドウを開けませんでした。{Environment.NewLine}{ex.Message}", "Markdown Viewer", MessageBoxButton.OK, MessageBoxImage.Error);
+    }
+  }
+
+  private ContextMenu BuildHistoryItemContextMenu() {
+    var contextMenu = new ContextMenu();
+
+    var openInNewWindowMenuItem = new MenuItem { Header = "別ウインドウで開く" };
+    openInNewWindowMenuItem.Click += OpenInNewWindowMenuItem_Click;
+    contextMenu.Items.Add(openInNewWindowMenuItem);
+
+    var openInExplorerMenuItem = new MenuItem { Header = "エクスプローラで開く" };
+    openInExplorerMenuItem.Click += OpenInExplorerMenuItem_Click;
+    contextMenu.Items.Add(openInExplorerMenuItem);
+
+    var copyPathMenuItem = new MenuItem { Header = "パスをコピー" };
+    copyPathMenuItem.Click += CopyPathMenuItem_Click;
+    contextMenu.Items.Add(copyPathMenuItem);
+
+    var removeHistoryMenuItem = new MenuItem { Header = "履歴から削除" };
+    removeHistoryMenuItem.Click += RemoveHistoryMenuItem_Click;
+    contextMenu.Items.Add(removeHistoryMenuItem);
+
+    return contextMenu;
+  }
+
+  private static bool TryGetHistoryItemFromMenuSender(object sender, out HistoryItem? historyItem) {
+    historyItem = null;
+
+    if (sender is not MenuItem menuItem || menuItem.Parent is not ContextMenu contextMenu) {
+      return false;
+    }
+
+    historyItem = (contextMenu.PlacementTarget as FrameworkElement)?.DataContext as HistoryItem;
+    return historyItem is not null;
   }
 
   private async Task RenderMarkdownFileAsync(string filePath) {
@@ -375,13 +544,16 @@ p { color: #555; }
       CoreWebView2HostResourceAccessKind.Allow);
   }
 
-  private void AddOrMoveHistory(string fullPath) {
+  private void UpdateHistory(string fullPath, HistoryUpdateMode historyUpdateMode) {
     var existing = historyItems.FirstOrDefault(x => string.Equals(x.FullPath, fullPath, StringComparison.OrdinalIgnoreCase));
 
     if (existing is not null) {
-      historyItems.Remove(existing);
-      historyItems.Insert(0, existing);
-      SaveHistory();
+      if (historyUpdateMode == HistoryUpdateMode.AddOrMove) {
+        historyItems.Remove(existing);
+        historyItems.Insert(0, existing);
+        SaveHistory();
+      }
+
       return;
     }
 
@@ -415,15 +587,22 @@ p { color: #555; }
     var localHistory = historyItems.Select(item => item.FullPath).ToList();
 
     settingRepository.Update(settings => {
-      var mergedHistory = new List<string>();
+      settings.History = localHistory;
+      settings.IsHistoryPaneVisible = HistoryToggleButton.IsChecked == true;
+    });
 
-      foreach (var path in localHistory) {
-        if (mergedHistory.Any(existing => string.Equals(existing, path, StringComparison.OrdinalIgnoreCase))) {
-          continue;
-        }
+    (Application.Current as App)?.RefreshAllWindowsFromSettings();
+  }
 
-        mergedHistory.Add(path);
-      }
+  internal void ApplySettings(AppSettings settings) {
+    suppressHistorySelectionChanged = true;
+
+    try {
+      ApplyHistoryPaneVisibility(settings.IsHistoryPaneVisible);
+
+      var currentSelectionPath = (HistoryListBox.SelectedItem as HistoryItem)?.FullPath;
+      var existingPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+      var orderedPaths = new List<string>();
 
       foreach (var path in settings.History) {
         if (string.IsNullOrWhiteSpace(path)) {
@@ -431,16 +610,24 @@ p { color: #555; }
         }
 
         var fullPath = Path.GetFullPath(path);
-        if (mergedHistory.Any(existing => string.Equals(existing, fullPath, StringComparison.OrdinalIgnoreCase))) {
+        if (!File.Exists(fullPath) || !existingPaths.Add(fullPath)) {
           continue;
         }
 
-        mergedHistory.Add(fullPath);
+        orderedPaths.Add(fullPath);
       }
 
-      settings.History = mergedHistory;
-      settings.IsHistoryPaneVisible = HistoryToggleButton.IsChecked == true;
-    });
+      historyItems.Clear();
+      foreach (var path in orderedPaths) {
+        historyItems.Add(new HistoryItem(path));
+      }
+
+      if (currentSelectionPath is not null) {
+        HistoryListBox.SelectedItem = historyItems.FirstOrDefault(x => string.Equals(x.FullPath, currentSelectionPath, StringComparison.OrdinalIgnoreCase));
+      }
+    } finally {
+      suppressHistorySelectionChanged = false;
+    }
   }
 
   private void ApplyHistoryPaneVisibility(bool isVisible) {
@@ -457,7 +644,67 @@ p { color: #555; }
     suppressHistorySelectionChanged = false;
   }
 
-  private sealed class HistoryItem {
+  private void RefreshHistoryItemDisplayState() {
+    var duplicateGroups = historyItems
+      .GroupBy(item => item.DisplayName, StringComparer.OrdinalIgnoreCase)
+      .Where(group => group.Count() > 1)
+      .ToList();
+
+    foreach (var item in historyItems) {
+      item.SecondaryText = string.Empty;
+    }
+
+    foreach (var group in duplicateGroups) {
+      var items = group.ToList();
+      foreach (var item in items) {
+        item.SecondaryText = BuildDistinctDirectorySuffix(item, items);
+      }
+    }
+  }
+
+  private static string BuildDistinctDirectorySuffix(HistoryItem targetItem, IReadOnlyCollection<HistoryItem> items) {
+    var targetSegments = GetDirectorySegments(targetItem.FullPath);
+    if (targetSegments.Count == 0) {
+      return "(親フォルダなし)";
+    }
+
+    for (var segmentCount = 1; segmentCount <= targetSegments.Count; segmentCount++) {
+      var candidate = JoinTrailingSegments(targetSegments, segmentCount);
+      var isUnique = items
+        .Where(item => !ReferenceEquals(item, targetItem))
+        .All(item => !string.Equals(candidate, JoinTrailingSegments(GetDirectorySegments(item.FullPath), segmentCount), StringComparison.OrdinalIgnoreCase));
+      if (isUnique) {
+        return candidate;
+      }
+    }
+
+    return string.Join(Path.DirectorySeparatorChar, targetSegments);
+  }
+
+  private static IReadOnlyList<string> GetDirectorySegments(string fullPath) {
+    var directoryPath = Path.GetDirectoryName(fullPath);
+    if (string.IsNullOrWhiteSpace(directoryPath)) {
+      return [];
+    }
+
+    var rootPath = Path.GetPathRoot(directoryPath);
+    return directoryPath
+      .Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+      .Where(segment => !string.IsNullOrWhiteSpace(segment) && !string.Equals(segment, rootPath, StringComparison.OrdinalIgnoreCase))
+      .ToArray();
+  }
+
+  private static string JoinTrailingSegments(IReadOnlyList<string> segments, int count) {
+    if (segments.Count == 0) {
+      return "(親フォルダなし)";
+    }
+
+    return string.Join(Path.DirectorySeparatorChar, segments.Skip(Math.Max(0, segments.Count - count)));
+  }
+
+  private sealed class HistoryItem : INotifyPropertyChanged {
+    private string secondaryText = string.Empty;
+
     public HistoryItem(string fullPath) {
       FullPath = fullPath;
       DisplayName = Path.GetFileName(fullPath);
@@ -466,5 +713,22 @@ p { color: #555; }
     public string DisplayName { get; }
 
     public string FullPath { get; }
+
+    public string SecondaryText {
+      get => secondaryText;
+      set {
+        if (string.Equals(secondaryText, value, StringComparison.Ordinal)) {
+          return;
+        }
+
+        secondaryText = value;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SecondaryText)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SecondaryTextVisibility)));
+      }
+    }
+
+    public Visibility SecondaryTextVisibility => string.IsNullOrWhiteSpace(secondaryText) ? Visibility.Collapsed : Visibility.Visible;
+
+    public event PropertyChangedEventHandler? PropertyChanged;
   }
 }
