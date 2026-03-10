@@ -1,0 +1,78 @@
+<Window x:Class="MarkdownViewer.SettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="設定"
+        Width="560"
+        Height="260"
+        MinWidth="520"
+        MinHeight="260"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize">
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <TextBlock FontSize="18"
+                   FontWeight="SemiBold"
+                   Text="設定" />
+
+        <StackPanel Grid.Row="1"
+                    Margin="0,16,0,0">
+            <TextBlock FontSize="13"
+                       Foreground="#333"
+                       Text="エディタのパス" />
+            <TextBlock Margin="0,4,0,0"
+                       FontSize="12"
+                       Foreground="#666"
+                       Text="外部エディタとして起動する実行ファイルを指定します。" />
+        </StackPanel>
+
+        <Grid Grid.Row="2"
+              Margin="0,12,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <TextBox x:Name="EditorPathTextBox"
+                     Grid.Column="0"
+                     Height="32"
+                     VerticalContentAlignment="Center" />
+
+            <Button Grid.Column="1"
+                    Width="84"
+                    Height="32"
+                    Margin="8,0,0,0"
+                    Click="BrowseButton_Click"
+                    Content="参照..." />
+
+            <Button Grid.Column="2"
+                    Width="72"
+                    Height="32"
+                    Margin="8,0,0,0"
+                    Click="ClearButton_Click"
+                    Content="クリア" />
+        </Grid>
+
+        <StackPanel Grid.Row="3"
+                    Margin="0,20,0,0"
+                    HorizontalAlignment="Right"
+                    Orientation="Horizontal">
+            <Button Width="88"
+                    Height="32"
+                    Margin="0,0,8,0"
+                    IsCancel="True"
+                    Content="キャンセル" />
+            <Button Width="88"
+                    Height="32"
+                    Click="SaveButton_Click"
+                    IsDefault="True"
+                    Content="保存" />
+        </StackPanel>
+    </Grid>
+</Window>

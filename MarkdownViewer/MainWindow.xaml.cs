@@ -23,6 +23,7 @@ public partial class MainWindow : Window {
   private readonly ObservableCollection<HistoryItem> historyItems = [];
   private string? currentMarkdownPath;
   private string currentSourceText = string.Empty;
+  private string editorPath = string.Empty;
   private bool isUnsafeHtmlEnabled;
   private bool suppressHistorySelectionChanged;
   private bool webViewEventsRegistered;
@@ -175,6 +176,22 @@ public partial class MainWindow : Window {
     TryOpenMarkdownByDialog();
   }
 
+  private void SettingsButton_Click(object sender, RoutedEventArgs e) {
+    var settingsWindow = new SettingsWindow(editorPath) {
+      Owner = this
+    };
+
+    if(settingsWindow.ShowDialog() != true) {
+      return;
+    }
+
+    settingRepository.Update(settings => {
+      settings.EditorPath = settingsWindow.EditorPath;
+    });
+
+    (Application.Current as App)?.RefreshAllWindowsFromSettings();
+  }
+
   private void SourceViewToggleButton_Click(object sender, RoutedEventArgs e) {
     currentViewMode = SourceViewToggleButton!.IsChecked == true ? ViewMode.Source : ViewMode.Preview;
     ApplyViewMode();
@@ -241,6 +258,24 @@ public partial class MainWindow : Window {
     }
 
     OpenFileInSeparateWindow(selectedItem.FullPath);
+  }
+
+  private void ReloadHistoryItemMenuItem_Click(object sender, RoutedEventArgs e) {
+    var selectedItem = GetHistoryItemFromMenuSender(sender);
+    if(selectedItem is null) {
+      return;
+    }
+
+    OpenMarkdownFile(selectedItem.FullPath, HistoryUpdateMode.None);
+  }
+
+  private void OpenInEditorMenuItem_Click(object sender, RoutedEventArgs e) {
+    var selectedItem = GetHistoryItemFromMenuSender(sender);
+    if(selectedItem is null) {
+      return;
+    }
+
+    OpenFileInEditor(selectedItem.FullPath);
   }
 
   private void CopyPathMenuItem_Click(object sender, RoutedEventArgs e) {
@@ -355,16 +390,48 @@ public partial class MainWindow : Window {
     }
   }
 
+  private void OpenFileInEditor(string filePath) {
+    var fullPath = Path.GetFullPath(filePath);
+    if(!File.Exists(fullPath)) {
+      var staleItem = historyItems.FirstOrDefault(x => string.Equals(x.FullPath, fullPath, StringComparison.OrdinalIgnoreCase));
+      if(staleItem is not null) {
+        historyItems.Remove(staleItem);
+        SaveHistory();
+      }
+
+      MessageBox.Show($"指定されたファイルが見つかりません。{Environment.NewLine}{fullPath}", "Markdown Viewer", MessageBoxButton.OK, MessageBoxImage.Warning);
+      return;
+    }
+
+    try {
+      Process.Start(new ProcessStartInfo {
+        FileName = editorPath,
+        Arguments = $"\"{fullPath}\"",
+        UseShellExecute = true
+      });
+    } catch(Exception ex) {
+      MessageBox.Show(
+        $"エディタを起動できませんでした。{Environment.NewLine}{editorPath}{Environment.NewLine}{Environment.NewLine}{ex.Message}",
+        "Markdown Viewer",
+        MessageBoxButton.OK,
+        MessageBoxImage.Error);
+    }
+  }
+
   private ContextMenu BuildHistoryItemContextMenu() {
     var contextMenu = new ContextMenu();
+
+    var reloadMenuItem = new MenuItem { Header = "再読み込み" };
+    reloadMenuItem.Click += ReloadHistoryItemMenuItem_Click;
+    contextMenu.Items.Add(reloadMenuItem);
 
     var openInNewWindowMenuItem = new MenuItem { Header = "別ウインドウで開く" };
     openInNewWindowMenuItem.Click += OpenInNewWindowMenuItem_Click;
     contextMenu.Items.Add(openInNewWindowMenuItem);
 
-    var openInExplorerMenuItem = new MenuItem { Header = "エクスプローラで開く" };
-    openInExplorerMenuItem.Click += OpenInExplorerMenuItem_Click;
-    contextMenu.Items.Add(openInExplorerMenuItem);
+    var openInEditorMenuItem = new MenuItem { Header = "エディタで編集" };
+    openInEditorMenuItem.Click += OpenInEditorMenuItem_Click;
+    contextMenu.Items.Add(openInEditorMenuItem);
 
     var copyPathMenuItem = new MenuItem { Header = "パスをコピー" };
     copyPathMenuItem.Click += CopyPathMenuItem_Click;
@@ -373,6 +440,10 @@ public partial class MainWindow : Window {
     var removeHistoryMenuItem = new MenuItem { Header = "履歴から削除" };
     removeHistoryMenuItem.Click += RemoveHistoryMenuItem_Click;
     contextMenu.Items.Add(removeHistoryMenuItem);
+
+    var openInExplorerMenuItem = new MenuItem { Header = "エクスプローラで開く" };
+    openInExplorerMenuItem.Click += OpenInExplorerMenuItem_Click;
+    contextMenu.Items.Add(openInExplorerMenuItem);
 
     return contextMenu;
   }
@@ -655,6 +726,7 @@ p { color: #555; }
     suppressHistorySelectionChanged = true;
 
     try {
+      editorPath = EditorPathResolver.Resolve(settings.EditorPath);
       ApplyHistoryPaneVisibility(settings.IsHistoryPaneVisible);
       UnsafeHtmlToggleButton!.IsChecked = isUnsafeHtmlEnabled;
       UpdateUnsafeHtmlToggleAppearance();

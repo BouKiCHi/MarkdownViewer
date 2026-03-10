@@ -125,4 +125,5 @@ public sealed class SettingRepository {
 public sealed class AppSettings {
   public List<string> History { get; set; } = [];
   public bool IsHistoryPaneVisible { get; set; } = true;
+  public string EditorPath { get; set; } = string.Empty;
 }
