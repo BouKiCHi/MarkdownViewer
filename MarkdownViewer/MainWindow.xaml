@@ -18,10 +18,17 @@
         </Grid.RowDefinitions>
 
         <Border Grid.Row="0"
+                x:Name="ToolbarBorder"
                 Padding="8"
                 BorderBrush="#D9D9D9"
                 BorderThickness="0,0,0,1"
                 Background="#F6F7F8">
+            <Border.ContextMenu>
+                <ContextMenu>
+                    <MenuItem Header="リリースページを表示"
+                              Click="OpenReleasePageMenuItem_Click" />
+                </ContextMenu>
+            </Border.ContextMenu>
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto" />
@@ -37,7 +44,7 @@
                                   Margin="0,0,8,0"
                                   IsChecked="True"
                                   Click="HistoryToggleButton_Click"
-                                  ToolTip="履歴一覧の表示/非表示">
+                                  ToolTip="タブ一覧の表示/非表示">
                         <TextBlock FontFamily="Segoe MDL2 Assets"
                                    FontSize="14"
                                    Text="&#xE700;"
@@ -140,34 +147,67 @@
                     BorderThickness="0,0,1,0"
                     Background="#FCFCFC">
                 <ListBox x:Name="HistoryListBox"
+                         AllowDrop="True"
                          BorderThickness="0"
+                         DragOver="HistoryListBox_DragOver"
+                         DragLeave="HistoryListBox_DragLeave"
+                         Drop="HistoryListBox_Drop"
+                         SelectionMode="Extended"
                          SelectionChanged="HistoryListBox_SelectionChanged">
                     <ListBox.ItemContainerStyle>
                         <Style TargetType="ListBoxItem">
                             <Setter Property="Padding"
                                     Value="0" />
+                            <Setter Property="HorizontalContentAlignment"
+                                    Value="Stretch" />
                             <EventSetter Event="Loaded"
                                          Handler="HistoryListBoxItem_Loaded" />
+                            <EventSetter Event="PreviewMouseLeftButtonDown"
+                                         Handler="HistoryListBoxItem_PreviewMouseLeftButtonDown" />
+                            <EventSetter Event="PreviewMouseMove"
+                                         Handler="HistoryListBoxItem_PreviewMouseMove" />
                             <EventSetter Event="PreviewMouseRightButtonDown"
                                          Handler="HistoryListBoxItem_PreviewMouseRightButtonDown" />
                         </Style>
                     </ListBox.ItemContainerStyle>
                     <ListBox.ItemTemplate>
                         <DataTemplate>
-                            <StackPanel Margin="6,4">
-                                <TextBlock Text="{Binding DisplayName}"
-                                           ToolTip="{Binding FullPath}"
-                                           TextTrimming="CharacterEllipsis"
-                                           FontSize="12"
-                                           Foreground="#222" />
-                                <TextBlock Text="{Binding SecondaryText}"
-                                           ToolTip="{Binding FullPath}"
-                                           TextTrimming="CharacterEllipsis"
-                                           FontSize="10"
-                                           Foreground="#666"
-                                           Margin="0,1,0,0"
-                                           Visibility="{Binding SecondaryTextVisibility}" />
-                            </StackPanel>
+                            <Border Margin="0"
+                                    HorizontalAlignment="Stretch"
+                                    BorderBrush="#2F6FEB">
+                                <Border.Style>
+                                    <Style TargetType="Border">
+                                        <Setter Property="BorderThickness"
+                                                Value="0" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsDropTargetBefore}"
+                                                         Value="True">
+                                                <Setter Property="BorderThickness"
+                                                        Value="0,2,0,0" />
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding IsDropTargetAfter}"
+                                                         Value="True">
+                                                <Setter Property="BorderThickness"
+                                                        Value="0,0,0,2" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Border.Style>
+                                <StackPanel Margin="6,4">
+                                    <TextBlock Text="{Binding DisplayName}"
+                                               ToolTip="{Binding FullPath}"
+                                               TextTrimming="CharacterEllipsis"
+                                               FontSize="12"
+                                               Foreground="#222" />
+                                    <TextBlock Text="{Binding SecondaryText}"
+                                               ToolTip="{Binding FullPath}"
+                                               TextTrimming="CharacterEllipsis"
+                                               FontSize="10"
+                                               Foreground="#666"
+                                               Margin="0,1,0,0"
+                                               Visibility="{Binding SecondaryTextVisibility}" />
+                                </StackPanel>
+                            </Border>
                         </DataTemplate>
                     </ListBox.ItemTemplate>
                 </ListBox>

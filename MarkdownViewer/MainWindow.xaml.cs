@@ -18,6 +18,9 @@ public partial class MainWindow : Window {
   private const string VirtualHostName = "markdown.local";
   private const string VirtualHostBaseUri = "https://markdown.local/";
   private const string AssetHostName = "appassets.local";
+  private const string ReleasePageUrl = "https://github.com/BouKiCHi/MarkdownViewer/releases";
+  private static readonly RoutedCommand ToggleHistoryPaneCommand = new();
+  private static readonly RoutedCommand ReloadMarkdownCommand = new();
 
   private readonly SettingRepository settingRepository = new();
   private readonly ObservableCollection<HistoryItem> historyItems = [];
@@ -27,6 +30,10 @@ public partial class MainWindow : Window {
   private bool isUnsafeHtmlEnabled;
   private bool suppressHistorySelectionChanged;
   private bool webViewEventsRegistered;
+  private Point? historyDragStartPoint;
+  private HistoryItem? draggedHistoryItem;
+  private HistoryItem? dropIndicatorItem;
+  private bool dropIndicatorAfter;
 
   private enum HistoryUpdateMode {
     None,
@@ -44,6 +51,10 @@ public partial class MainWindow : Window {
   public MainWindow(string? initialFilePath) {
     InitializeComponent();
 
+    CommandBindings.Add(new CommandBinding(ToggleHistoryPaneCommand, ToggleHistoryPaneCommand_Executed));
+    CommandBindings.Add(new CommandBinding(ReloadMarkdownCommand, ReloadMarkdownCommand_Executed));
+    InputBindings.Add(new KeyBinding(ToggleHistoryPaneCommand, new KeyGesture(Key.B, ModifierKeys.Control)));
+    InputBindings.Add(new KeyBinding(ReloadMarkdownCommand, new KeyGesture(Key.R, ModifierKeys.Control)));
     HistoryListBox.ItemsSource = historyItems;
     historyItems.CollectionChanged += HistoryItems_CollectionChanged;
     ApplySettings(settingRepository.Load());
@@ -192,6 +203,14 @@ public partial class MainWindow : Window {
     (Application.Current as App)?.RefreshAllWindowsFromSettings();
   }
 
+  private void OpenReleasePageMenuItem_Click(object sender, RoutedEventArgs e) {
+    if(TryOpenExternalUrl(ReleasePageUrl)) {
+      return;
+    }
+
+    MessageBox.Show($"リリースページを開けませんでした。{Environment.NewLine}{ReleasePageUrl}", "Markdown Viewer", MessageBoxButton.OK, MessageBoxImage.Error);
+  }
+
   private void SourceViewToggleButton_Click(object sender, RoutedEventArgs e) {
     currentViewMode = SourceViewToggleButton!.IsChecked == true ? ViewMode.Source : ViewMode.Preview;
     ApplyViewMode();
@@ -211,8 +230,22 @@ public partial class MainWindow : Window {
     SaveHistory();
   }
 
+  private void ToggleHistoryPaneCommand_Executed(object sender, ExecutedRoutedEventArgs e) {
+    var nextValue = HistoryToggleButton!.IsChecked != true;
+    ApplyHistoryPaneVisibility(nextValue);
+    SaveHistory();
+  }
+
+  private async void ReloadMarkdownCommand_Executed(object sender, ExecutedRoutedEventArgs e) {
+    if(currentMarkdownPath is null) {
+      return;
+    }
+
+    await RenderMarkdownFileAsync(currentMarkdownPath);
+  }
+
   private void HistoryListBox_SelectionChanged(object sender, SelectionChangedEventArgs e) {
-    if(suppressHistorySelectionChanged || HistoryListBox!.SelectedItem is not HistoryItem selected) {
+    if(suppressHistorySelectionChanged || HistoryListBox!.SelectedItems.Count != 1 || HistoryListBox.SelectedItem is not HistoryItem selected) {
       return;
     }
 
@@ -227,12 +260,51 @@ public partial class MainWindow : Window {
     item.ContextMenu ??= BuildHistoryItemContextMenu();
   }
 
+  private void HistoryListBoxItem_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e) {
+    if(sender is not ListBoxItem item || item.DataContext is not HistoryItem historyItem) {
+      historyDragStartPoint = null;
+      draggedHistoryItem = null;
+      return;
+    }
+
+    historyDragStartPoint = e.GetPosition(HistoryListBox);
+    draggedHistoryItem = historyItem;
+  }
+
+  private void HistoryListBoxItem_PreviewMouseMove(object sender, MouseEventArgs e) {
+    if(e.LeftButton != MouseButtonState.Pressed || sender is not ListBoxItem item || draggedHistoryItem is null || historyDragStartPoint is null) {
+      return;
+    }
+
+    var currentPosition = e.GetPosition(HistoryListBox);
+    var dragDistance = currentPosition - historyDragStartPoint.Value;
+    if(Math.Abs(dragDistance.X) < SystemParameters.MinimumHorizontalDragDistance
+      && Math.Abs(dragDistance.Y) < SystemParameters.MinimumVerticalDragDistance) {
+      return;
+    }
+
+    try {
+      DragDrop.DoDragDrop(item, draggedHistoryItem, DragDropEffects.Move);
+    } finally {
+      historyDragStartPoint = null;
+      draggedHistoryItem = null;
+    }
+  }
+
   private void HistoryListBoxItem_PreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e) {
-    if(sender is not ListBoxItem item) {
+    if(sender is not ListBoxItem item || item.DataContext is not HistoryItem historyItem) {
       return;
     }
 
     e.Handled = true;
+
+    if(!item.IsSelected) {
+      suppressHistorySelectionChanged = true;
+      HistoryListBox!.SelectedItems.Clear();
+      item.IsSelected = true;
+      suppressHistorySelectionChanged = false;
+    }
+
     item.Focus();
 
     var contextMenu = item.ContextMenu;
@@ -240,6 +312,72 @@ public partial class MainWindow : Window {
       contextMenu.PlacementTarget = item;
       contextMenu.IsOpen = true;
     }
+  }
+
+  private void HistoryListBox_DragOver(object sender, DragEventArgs e) {
+    if(e.Data.GetDataPresent(typeof(HistoryItem))) {
+      e.Effects = DragDropEffects.Move;
+    } else if(TryGetDroppedMarkdownPaths(e.Data).Count > 0) {
+      e.Effects = DragDropEffects.Copy;
+    } else {
+      e.Effects = DragDropEffects.None;
+    }
+
+    if(e.Effects == DragDropEffects.None) {
+      ClearDropIndicator();
+      e.Handled = true;
+      return;
+    }
+
+    var targetContainer = ItemsControl.ContainerFromElement(HistoryListBox!, e.OriginalSource as DependencyObject) as ListBoxItem;
+    var targetItem = targetContainer?.DataContext as HistoryItem;
+    var isAfter = targetContainer is not null && e.GetPosition(targetContainer).Y > targetContainer.ActualHeight / 2;
+    UpdateDropIndicator(targetItem, isAfter);
+    e.Handled = true;
+  }
+
+  private void HistoryListBox_DragLeave(object sender, DragEventArgs e) {
+    if(!HistoryListBox!.IsMouseOver) {
+      ClearDropIndicator();
+    }
+  }
+
+  private void HistoryListBox_Drop(object sender, DragEventArgs e) {
+    if(e.Data.GetDataPresent(typeof(HistoryItem))) {
+      var sourceItem = e.Data.GetData(typeof(HistoryItem)) as HistoryItem;
+      if(sourceItem is null) {
+        ClearDropIndicator();
+        return;
+      }
+
+      var targetContainer = ItemsControl.ContainerFromElement(HistoryListBox!, e.OriginalSource as DependencyObject) as ListBoxItem;
+      var targetItem = targetContainer?.DataContext as HistoryItem;
+
+      var dropTarget = (IInputElement?)targetContainer ?? HistoryListBox!;
+      var targetHeight = targetContainer?.ActualHeight;
+      MoveHistoryItem(sourceItem, targetItem, e.GetPosition(dropTarget), targetHeight);
+      ClearDropIndicator();
+      draggedHistoryItem = null;
+      historyDragStartPoint = null;
+      e.Handled = true;
+      return;
+    }
+
+    var droppedPaths = TryGetDroppedMarkdownPaths(e.Data);
+    if(droppedPaths.Count == 0) {
+      ClearDropIndicator();
+      return;
+    }
+
+    var fileDropTargetContainer = ItemsControl.ContainerFromElement(HistoryListBox!, e.OriginalSource as DependencyObject) as ListBoxItem;
+    var fileDropTargetItem = fileDropTargetContainer?.DataContext as HistoryItem;
+    var insertIndex = GetDropInsertIndex(fileDropTargetItem, fileDropTargetContainer, e);
+    InsertHistoryItems(droppedPaths, insertIndex);
+    OpenMarkdownFile(droppedPaths[0], HistoryUpdateMode.None);
+    ClearDropIndicator();
+    draggedHistoryItem = null;
+    historyDragStartPoint = null;
+    e.Handled = true;
   }
 
   private void OpenInExplorerMenuItem_Click(object sender, RoutedEventArgs e) {
@@ -288,17 +426,18 @@ public partial class MainWindow : Window {
   }
 
   private void RemoveHistoryMenuItem_Click(object sender, RoutedEventArgs e) {
-    var selectedItem = GetHistoryItemFromMenuSender(sender);
-    if(selectedItem is null) {
+    var selectedItems = GetHistoryItemsFromMenuSender(sender);
+    if(selectedItems.Count == 0) {
       return;
     }
 
     suppressHistorySelectionChanged = true;
-    historyItems.Remove(selectedItem);
 
-    if(ReferenceEquals(HistoryListBox!.SelectedItem, selectedItem)) {
-      HistoryListBox.SelectedItem = null;
+    foreach(var selectedItem in selectedItems) {
+      historyItems.Remove(selectedItem);
     }
+
+    HistoryListBox!.SelectedItems.Clear();
 
     suppressHistorySelectionChanged = false;
     SaveHistory();
@@ -425,6 +564,14 @@ public partial class MainWindow : Window {
     reloadMenuItem.Click += ReloadHistoryItemMenuItem_Click;
     contextMenu.Items.Add(reloadMenuItem);
 
+    contextMenu.Items.Add(new Separator());
+
+    var removeHistoryMenuItem = new MenuItem { Header = "選択したタブを削除" };
+    removeHistoryMenuItem.Click += RemoveHistoryMenuItem_Click;
+    contextMenu.Items.Add(removeHistoryMenuItem);
+
+    contextMenu.Items.Add(new Separator());
+
     var openInNewWindowMenuItem = new MenuItem { Header = "別ウインドウで開く" };
     openInNewWindowMenuItem.Click += OpenInNewWindowMenuItem_Click;
     contextMenu.Items.Add(openInNewWindowMenuItem);
@@ -436,10 +583,6 @@ public partial class MainWindow : Window {
     var copyPathMenuItem = new MenuItem { Header = "パスをコピー" };
     copyPathMenuItem.Click += CopyPathMenuItem_Click;
     contextMenu.Items.Add(copyPathMenuItem);
-
-    var removeHistoryMenuItem = new MenuItem { Header = "履歴から削除" };
-    removeHistoryMenuItem.Click += RemoveHistoryMenuItem_Click;
-    contextMenu.Items.Add(removeHistoryMenuItem);
 
     var openInExplorerMenuItem = new MenuItem { Header = "エクスプローラで開く" };
     openInExplorerMenuItem.Click += OpenInExplorerMenuItem_Click;
@@ -454,6 +597,27 @@ public partial class MainWindow : Window {
     }
 
     return (contextMenu.PlacementTarget as FrameworkElement)?.DataContext as HistoryItem;
+  }
+
+  private IReadOnlyList<HistoryItem> GetHistoryItemsFromMenuSender(object sender) {
+    var contextItem = GetHistoryItemFromMenuSender(sender);
+    if(contextItem is null) {
+      return [];
+    }
+
+    var selectedItems = HistoryListBox!.SelectedItems
+      .OfType<HistoryItem>()
+      .ToList();
+
+    if(selectedItems.Count == 0) {
+      return [contextItem];
+    }
+
+    if(selectedItems.Any(item => ReferenceEquals(item, contextItem))) {
+      return selectedItems;
+    }
+
+    return [contextItem];
   }
 
   private async Task RenderMarkdownFileAsync(string filePath) {
@@ -698,17 +862,131 @@ p { color: #555; }
     var existing = historyItems.FirstOrDefault(x => string.Equals(x.FullPath, fullPath, StringComparison.OrdinalIgnoreCase));
 
     if(existing is not null) {
-      if(historyUpdateMode == HistoryUpdateMode.AddOrMove) {
-        historyItems.Remove(existing);
-        historyItems.Insert(0, existing);
-        SaveHistory();
-      }
-
       return;
     }
 
-    historyItems.Insert(0, new HistoryItem(fullPath));
+    historyItems.Add(new HistoryItem(fullPath));
     SaveHistory();
+  }
+
+  private void MoveHistoryItem(HistoryItem sourceItem, HistoryItem? targetItem, Point dropPosition, double? targetHeight) {
+    var sourceIndex = historyItems.IndexOf(sourceItem);
+    if(sourceIndex < 0) {
+      return;
+    }
+
+    var targetIndex = targetItem is null ? historyItems.Count - 1 : historyItems.IndexOf(targetItem);
+    if(targetIndex < 0) {
+      return;
+    }
+
+    if(targetItem is not null && targetHeight.HasValue && dropPosition.Y > targetHeight.Value / 2) {
+      targetIndex++;
+    }
+
+    if(targetIndex > sourceIndex) {
+      targetIndex--;
+    }
+
+    if(targetIndex == sourceIndex) {
+      return;
+    }
+
+    targetIndex = Math.Max(0, Math.Min(targetIndex, historyItems.Count - 1));
+    historyItems.Move(sourceIndex, targetIndex);
+    HistoryListBox!.SelectedItem = sourceItem;
+    SaveHistory();
+  }
+
+  private int GetDropInsertIndex(HistoryItem? targetItem, ListBoxItem? targetContainer, DragEventArgs e) {
+    if(targetItem is null) {
+      return historyItems.Count;
+    }
+
+    var targetIndex = historyItems.IndexOf(targetItem);
+    if(targetIndex < 0) {
+      return historyItems.Count;
+    }
+
+    if(targetContainer is not null && e.GetPosition(targetContainer).Y > targetContainer.ActualHeight / 2) {
+      targetIndex++;
+    }
+
+    return Math.Max(0, Math.Min(targetIndex, historyItems.Count));
+  }
+
+  private void InsertHistoryItems(IReadOnlyList<string> filePaths, int insertIndex) {
+    var currentIndex = Math.Max(0, Math.Min(insertIndex, historyItems.Count));
+    var changed = false;
+
+    foreach(var filePath in filePaths) {
+      var fullPath = Path.GetFullPath(filePath);
+      var existingItem = historyItems.FirstOrDefault(x => string.Equals(x.FullPath, fullPath, StringComparison.OrdinalIgnoreCase));
+      if(existingItem is not null) {
+        var existingIndex = historyItems.IndexOf(existingItem);
+        if(existingIndex >= 0) {
+          historyItems.RemoveAt(existingIndex);
+          if(existingIndex < currentIndex) {
+            currentIndex--;
+          }
+        }
+      }
+
+      historyItems.Insert(currentIndex, new HistoryItem(fullPath));
+      currentIndex++;
+      changed = true;
+    }
+
+    if(changed) {
+      SaveHistory();
+    }
+  }
+
+  private static IReadOnlyList<string> TryGetDroppedMarkdownPaths(IDataObject dataObject) {
+    if(!dataObject.GetDataPresent(DataFormats.FileDrop)) {
+      return [];
+    }
+
+    if(dataObject.GetData(DataFormats.FileDrop) is not string[] rawPaths) {
+      return [];
+    }
+
+    return rawPaths
+      .Where(path => !string.IsNullOrWhiteSpace(path))
+      .Select(Path.GetFullPath)
+      .Where(File.Exists)
+      .Where(path => string.Equals(Path.GetExtension(path), ".md", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(Path.GetExtension(path), ".markdown", StringComparison.OrdinalIgnoreCase))
+      .Distinct(StringComparer.OrdinalIgnoreCase)
+      .ToArray();
+  }
+
+  private void UpdateDropIndicator(HistoryItem? targetItem, bool isAfter) {
+    if(ReferenceEquals(dropIndicatorItem, targetItem) && dropIndicatorAfter == isAfter) {
+      return;
+    }
+
+    ClearDropIndicator();
+
+    if(targetItem is null) {
+      return;
+    }
+
+    dropIndicatorItem = targetItem;
+    dropIndicatorAfter = isAfter;
+    targetItem.IsDropTargetBefore = !isAfter;
+    targetItem.IsDropTargetAfter = isAfter;
+  }
+
+  private void ClearDropIndicator() {
+    if(dropIndicatorItem is null) {
+      return;
+    }
+
+    dropIndicatorItem.IsDropTargetBefore = false;
+    dropIndicatorItem.IsDropTargetAfter = false;
+    dropIndicatorItem = null;
+    dropIndicatorAfter = false;
   }
 
   private void SaveHistory() {
@@ -862,6 +1140,8 @@ p { color: #555; }
 
   private sealed class HistoryItem : INotifyPropertyChanged {
     private string secondaryText = string.Empty;
+    private bool isDropTargetBefore;
+    private bool isDropTargetAfter;
 
     public HistoryItem(string fullPath) {
       FullPath = fullPath;
@@ -886,6 +1166,30 @@ p { color: #555; }
     }
 
     public Visibility SecondaryTextVisibility => string.IsNullOrWhiteSpace(secondaryText) ? Visibility.Collapsed : Visibility.Visible;
+
+    public bool IsDropTargetBefore {
+      get => isDropTargetBefore;
+      set {
+        if(isDropTargetBefore == value) {
+          return;
+        }
+
+        isDropTargetBefore = value;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsDropTargetBefore)));
+      }
+    }
+
+    public bool IsDropTargetAfter {
+      get => isDropTargetAfter;
+      set {
+        if(isDropTargetAfter == value) {
+          return;
+        }
+
+        isDropTargetAfter = value;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsDropTargetAfter)));
+      }
+    }
 
     public event PropertyChangedEventHandler? PropertyChanged;
   }
