@@ -54,10 +54,15 @@ PowerShellスクリプトで、`publish` / `zip作成` / `SHA256SUMS.txt` 生成
 powershell -ExecutionPolicy Bypass -File .\scripts\release.ps1
 ```
 
+NSIS の `makensis` が利用可能であれば、同時にインストーラも生成します。不要な場合は `-SkipInstaller` を指定してください。
+
+`third_party/WebView2/MicrosoftEdgeWebView2Setup.exe` に Microsoft 公式の WebView2 Evergreen Bootstrapper を配置しておくと、NSIS インストーラへ同梱され、Runtime 未導入環境でのみサイレント実行されます。
+
 主な出力先:
 
 - `artifacts/publish/...` : publish結果
 - `artifacts/package/*.zip` : 配布zip
+- `artifacts/package/*-setup.exe` : NSIS インストーラ
 - `artifacts/package/SHA256SUMS.txt` : zipとexeのSHA-256
 
 ## 実行

@@ -76,7 +76,11 @@ public partial class MainWindow : Window {
 
   private async void Window_Loaded(object sender, RoutedEventArgs e) {
     try {
-      await MarkdownWebView.EnsureCoreWebView2Async();
+      var localAppDataPath = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+      var webViewUserDataFolder = Path.Combine(localAppDataPath, "MarkdownViewer", "WebView2");
+      Directory.CreateDirectory(webViewUserDataFolder);
+      var webViewEnvironment = await CoreWebView2Environment.CreateAsync(userDataFolder: webViewUserDataFolder);
+      await MarkdownWebView.EnsureCoreWebView2Async(webViewEnvironment);
     } catch(Exception ex) {
       MessageBox.Show($"WebView2 の初期化に失敗しました。{Environment.NewLine}{ex.Message}", "Markdown Viewer", MessageBoxButton.OK, MessageBoxImage.Error);
       return;
