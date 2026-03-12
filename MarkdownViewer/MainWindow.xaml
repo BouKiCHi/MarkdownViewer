@@ -24,7 +24,12 @@
                 BorderThickness="0,0,0,1"
                 Background="#F6F7F8">
             <Border.ContextMenu>
-                <ContextMenu>
+                <ContextMenu x:Name="ToolbarContextMenu">
+                    <MenuItem Header="設定"
+                              Click="ToolbarSettingsMenuItem_Click" />
+                    <MenuItem Header="バージョン情報"
+                              Click="ToolbarAboutMenuItem_Click" />
+                    <Separator />
                     <MenuItem Header="リリースページを表示"
                               Click="OpenReleasePageMenuItem_Click" />
                 </ContextMenu>
@@ -124,10 +129,10 @@
                             Height="32"
                             Margin="8,0,0,0"
                             Click="SettingsButton_Click"
-                            ToolTip="設定">
-                        <TextBlock FontFamily="Segoe MDL2 Assets"
-                                   FontSize="14"
-                                   Text="&#xE713;"
+                            ToolTip="メニュー">
+                        <TextBlock FontFamily="Segoe UI Symbol"
+                                   FontSize="16"
+                                   Text="&#x22EE;"
                                    HorizontalAlignment="Center"
                                    VerticalAlignment="Center" />
                     </Button>
@@ -139,6 +144,8 @@
             <Grid.ColumnDefinitions>
                 <ColumnDefinition x:Name="HistoryColumn"
                                   Width="220" />
+                <ColumnDefinition x:Name="HistorySplitterColumn"
+                                  Width="6" />
                 <ColumnDefinition Width="*" />
             </Grid.ColumnDefinitions>
 
@@ -146,74 +153,139 @@
                     BorderBrush="#D9D9D9"
                     BorderThickness="0,0,1,0"
                     Background="#FCFCFC">
-                <ListBox x:Name="HistoryListBox"
-                         AllowDrop="True"
-                         BorderThickness="0"
-                         DragOver="HistoryListBox_DragOver"
-                         DragLeave="HistoryListBox_DragLeave"
-                         Drop="HistoryListBox_Drop"
-                         SelectionMode="Extended"
-                         SelectionChanged="HistoryListBox_SelectionChanged">
-                    <ListBox.ItemContainerStyle>
-                        <Style TargetType="ListBoxItem">
-                            <Setter Property="Padding"
-                                    Value="0" />
-                            <Setter Property="HorizontalContentAlignment"
-                                    Value="Stretch" />
-                            <EventSetter Event="Loaded"
-                                         Handler="HistoryListBoxItem_Loaded" />
-                            <EventSetter Event="PreviewMouseLeftButtonDown"
-                                         Handler="HistoryListBoxItem_PreviewMouseLeftButtonDown" />
-                            <EventSetter Event="PreviewMouseMove"
-                                         Handler="HistoryListBoxItem_PreviewMouseMove" />
-                            <EventSetter Event="PreviewMouseRightButtonDown"
-                                         Handler="HistoryListBoxItem_PreviewMouseRightButtonDown" />
-                        </Style>
-                    </ListBox.ItemContainerStyle>
-                    <ListBox.ItemTemplate>
-                        <DataTemplate>
-                            <Border Margin="0"
-                                    HorizontalAlignment="Stretch"
-                                    BorderBrush="#2F6FEB">
-                                <Border.Style>
-                                    <Style TargetType="Border">
-                                        <Setter Property="BorderThickness"
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="160" />
+                    </Grid.RowDefinitions>
+
+                    <ListBox x:Name="HistoryListBox"
+                             Grid.Row="0"
+                             AllowDrop="True"
+                             BorderThickness="0"
+                             DragOver="HistoryListBox_DragOver"
+                             DragLeave="HistoryListBox_DragLeave"
+                             Drop="HistoryListBox_Drop"
+                             SelectionMode="Extended"
+                             SelectionChanged="HistoryListBox_SelectionChanged">
+                        <ListBox.ItemContainerStyle>
+                            <Style TargetType="ListBoxItem">
+                                <Setter Property="Padding"
+                                        Value="0" />
+                                <Setter Property="HorizontalContentAlignment"
+                                        Value="Stretch" />
+                                <EventSetter Event="Loaded"
+                                             Handler="HistoryListBoxItem_Loaded" />
+                                <EventSetter Event="PreviewMouseLeftButtonDown"
+                                             Handler="HistoryListBoxItem_PreviewMouseLeftButtonDown" />
+                                <EventSetter Event="PreviewMouseMove"
+                                             Handler="HistoryListBoxItem_PreviewMouseMove" />
+                                <EventSetter Event="PreviewMouseRightButtonDown"
+                                             Handler="HistoryListBoxItem_PreviewMouseRightButtonDown" />
+                            </Style>
+                        </ListBox.ItemContainerStyle>
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <Border Margin="0"
+                                        HorizontalAlignment="Stretch"
+                                        BorderBrush="#2F6FEB">
+                                    <Border.Style>
+                                        <Style TargetType="Border">
+                                            <Setter Property="BorderThickness"
+                                                    Value="0" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding IsDropTargetBefore}"
+                                                             Value="True">
+                                                    <Setter Property="BorderThickness"
+                                                            Value="0,2,0,0" />
+                                                </DataTrigger>
+                                                <DataTrigger Binding="{Binding IsDropTargetAfter}"
+                                                             Value="True">
+                                                    <Setter Property="BorderThickness"
+                                                            Value="0,0,0,2" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Border.Style>
+                                    <StackPanel Margin="6,4">
+                                        <TextBlock Text="{Binding DisplayName}"
+                                                   ToolTip="{Binding FullPath}"
+                                                   TextTrimming="CharacterEllipsis"
+                                                   FontSize="12"
+                                                   Foreground="#222" />
+                                        <TextBlock Text="{Binding SecondaryText}"
+                                                   ToolTip="{Binding FullPath}"
+                                                   TextTrimming="CharacterEllipsis"
+                                                   FontSize="10"
+                                                   Foreground="#666"
+                                                   Margin="0,1,0,0"
+                                                   Visibility="{Binding SecondaryTextVisibility}" />
+                                    </StackPanel>
+                                </Border>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+
+                    <GridSplitter Grid.Row="1"
+                                  Height="6"
+                                  HorizontalAlignment="Stretch"
+                                  VerticalAlignment="Center"
+                                  ResizeDirection="Rows"
+                                  ResizeBehavior="PreviousAndNext"
+                                  Background="#E5E7EB" />
+
+                    <Border Grid.Row="2"
+                            BorderThickness="0,1,0,0"
+                            BorderBrush="#E3E3E3"
+                            Background="#F8F9FA">
+                        <DockPanel LastChildFill="True">
+                            <TextBlock DockPanel.Dock="Top"
+                                       Margin="10,8,10,6"
+                                       FontSize="11"
+                                       FontWeight="SemiBold"
+                                       Foreground="#555"
+                                       Text="アウトライン" />
+                            <ListBox x:Name="OutlineListBox"
+                                     BorderThickness="0"
+                                     Background="Transparent"
+                                     SelectionChanged="OutlineListBox_SelectionChanged">
+                                <ListBox.ItemContainerStyle>
+                                    <Style TargetType="ListBoxItem">
+                                        <Setter Property="HorizontalContentAlignment"
+                                                Value="Stretch" />
+                                        <Setter Property="Padding"
                                                 Value="0" />
-                                        <Style.Triggers>
-                                            <DataTrigger Binding="{Binding IsDropTargetBefore}"
-                                                         Value="True">
-                                                <Setter Property="BorderThickness"
-                                                        Value="0,2,0,0" />
-                                            </DataTrigger>
-                                            <DataTrigger Binding="{Binding IsDropTargetAfter}"
-                                                         Value="True">
-                                                <Setter Property="BorderThickness"
-                                                        Value="0,0,0,2" />
-                                            </DataTrigger>
-                                        </Style.Triggers>
                                     </Style>
-                                </Border.Style>
-                                <StackPanel Margin="6,4">
-                                    <TextBlock Text="{Binding DisplayName}"
-                                               ToolTip="{Binding FullPath}"
-                                               TextTrimming="CharacterEllipsis"
-                                               FontSize="12"
-                                               Foreground="#222" />
-                                    <TextBlock Text="{Binding SecondaryText}"
-                                               ToolTip="{Binding FullPath}"
-                                               TextTrimming="CharacterEllipsis"
-                                               FontSize="10"
-                                               Foreground="#666"
-                                               Margin="0,1,0,0"
-                                               Visibility="{Binding SecondaryTextVisibility}" />
-                                </StackPanel>
-                            </Border>
-                        </DataTemplate>
-                    </ListBox.ItemTemplate>
-                </ListBox>
+                                </ListBox.ItemContainerStyle>
+                                <ListBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border Padding="{Binding IndentPadding}"
+                                                Background="Transparent">
+                                            <TextBlock Text="{Binding Title}"
+                                                       ToolTip="{Binding Title}"
+                                                       TextTrimming="CharacterEllipsis"
+                                                       FontSize="11"
+                                                       Foreground="#333" />
+                                        </Border>
+                                    </DataTemplate>
+                                </ListBox.ItemTemplate>
+                            </ListBox>
+                        </DockPanel>
+                    </Border>
+                </Grid>
             </Border>
 
-            <Grid Grid.Column="1">
+            <GridSplitter x:Name="HistoryGridSplitter"
+                          Grid.Column="1"
+                          Width="6"
+                          HorizontalAlignment="Stretch"
+                          VerticalAlignment="Stretch"
+                          ResizeDirection="Columns"
+                          ResizeBehavior="PreviousAndNext"
+                          Background="#E5E7EB" />
+
+            <Grid Grid.Column="2">
                 <wv2:WebView2 x:Name="MarkdownWebView" />
 
                 <TextBox x:Name="SourceTextBox"

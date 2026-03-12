@@ -5,8 +5,10 @@ using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -24,6 +26,8 @@ public partial class MainWindow : Window {
 
   private readonly SettingRepository settingRepository = new();
   private readonly ObservableCollection<HistoryItem> historyItems = [];
+  private readonly ObservableCollection<OutlineItem> outlineItems = [];
+  private static readonly Regex AtxHeadingRegex = new(@"^(#{1,6})\s+(.*?)\s*#*\s*$", RegexOptions.Compiled);
   private string? currentMarkdownPath;
   private string currentSourceText = string.Empty;
   private string editorPath = string.Empty;
@@ -56,6 +60,7 @@ public partial class MainWindow : Window {
     InputBindings.Add(new KeyBinding(ToggleHistoryPaneCommand, new KeyGesture(Key.B, ModifierKeys.Control)));
     InputBindings.Add(new KeyBinding(ReloadMarkdownCommand, new KeyGesture(Key.R, ModifierKeys.Control)));
     HistoryListBox.ItemsSource = historyItems;
+    OutlineListBox.ItemsSource = outlineItems;
     historyItems.CollectionChanged += HistoryItems_CollectionChanged;
     ApplySettings(settingRepository.Load());
     ApplyViewMode();
@@ -188,6 +193,29 @@ public partial class MainWindow : Window {
   }
 
   private void SettingsButton_Click(object sender, RoutedEventArgs e) {
+    if(ToolbarContextMenu is null) {
+      OpenSettingsDialog();
+      return;
+    }
+
+    ToolbarContextMenu.PlacementTarget = SettingsButton;
+    ToolbarContextMenu.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
+    ToolbarContextMenu.IsOpen = true;
+  }
+
+  private void ToolbarSettingsMenuItem_Click(object sender, RoutedEventArgs e) {
+    OpenSettingsDialog();
+  }
+
+  private void ToolbarAboutMenuItem_Click(object sender, RoutedEventArgs e) {
+    var aboutWindow = new AboutWindow(ReleasePageUrl) {
+      Owner = this
+    };
+
+    aboutWindow.ShowDialog();
+  }
+
+  private void OpenSettingsDialog() {
     var settingsWindow = new SettingsWindow(editorPath) {
       Owner = this
     };
@@ -250,6 +278,22 @@ public partial class MainWindow : Window {
     }
 
     OpenMarkdownFile(selected.FullPath, HistoryUpdateMode.None);
+  }
+
+  private async void OutlineListBox_SelectionChanged(object sender, SelectionChangedEventArgs e) {
+    if(OutlineListBox.SelectedItem is not OutlineItem selected) {
+      return;
+    }
+
+    try {
+      if(currentViewMode == ViewMode.Source) {
+        ScrollSourceToOutline(selected);
+      } else {
+        await ScrollPreviewToHeadingAsync(selected.Slug);
+      }
+    } finally {
+      OutlineListBox.SelectedItem = null;
+    }
   }
 
   private void HistoryListBoxItem_Loaded(object sender, RoutedEventArgs e) {
@@ -425,6 +469,15 @@ public partial class MainWindow : Window {
     Clipboard.SetText(selectedItem.FullPath);
   }
 
+  private void CopyFileNameMenuItem_Click(object sender, RoutedEventArgs e) {
+    var selectedItem = GetHistoryItemFromMenuSender(sender);
+    if(selectedItem is null) {
+      return;
+    }
+
+    Clipboard.SetText(Path.GetFileName(selectedItem.FullPath));
+  }
+
   private void RemoveHistoryMenuItem_Click(object sender, RoutedEventArgs e) {
     var selectedItems = GetHistoryItemsFromMenuSender(sender);
     if(selectedItems.Count == 0) {
@@ -580,6 +633,10 @@ public partial class MainWindow : Window {
     openInEditorMenuItem.Click += OpenInEditorMenuItem_Click;
     contextMenu.Items.Add(openInEditorMenuItem);
 
+    var copyFileNameMenuItem = new MenuItem { Header = "ファイル名をコピー" };
+    copyFileNameMenuItem.Click += CopyFileNameMenuItem_Click;
+    contextMenu.Items.Add(copyFileNameMenuItem);
+
     var copyPathMenuItem = new MenuItem { Header = "パスをコピー" };
     copyPathMenuItem.Click += CopyPathMenuItem_Click;
     contextMenu.Items.Add(copyPathMenuItem);
@@ -635,6 +692,7 @@ public partial class MainWindow : Window {
 
     currentSourceText = markdownText;
     SourceTextBox.Text = markdownText;
+    UpdateOutline(markdownText);
     currentMarkdownPath = filePath;
     PathTextBlock.Text = Path.GetFileName(filePath);
     PathTextBlock.Foreground = new SolidColorBrush(Color.FromRgb(68, 68, 68));
@@ -655,6 +713,7 @@ public partial class MainWindow : Window {
 
     currentSourceText = $"{title}{Environment.NewLine}{Environment.NewLine}{message}";
     SourceTextBox.Text = currentSourceText;
+    outlineItems.Clear();
     var safeTitle = HtmlEncoder.Default.Encode(title);
     var safeMessage = HtmlEncoder.Default.Encode(message);
 
@@ -787,6 +846,17 @@ p { color: #555; }
       document.getElementById('main').innerHTML = renderedHtml;
 
       const isAbsoluteUrl = (value) => /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(value) || value.startsWith('//');
+      const createSlug = (value) => {
+        const normalized = (value || '')
+          .normalize('NFKC')
+          .trim()
+          .toLowerCase()
+          .replace(/[^\p{L}\p{N}\s-]/gu, '')
+          .replace(/\s+/g, '-')
+          .replace(/-+/g, '-')
+          .replace(/^-|-$/g, '');
+        return normalized || 'section';
+      };
       const toAbsoluteUrl = (value) => {
         if (!value || isAbsoluteUrl(value) || value.startsWith('#')) {
           return value;
@@ -822,6 +892,18 @@ p { color: #555; }
             })
             .join(', ');
         }
+      }
+
+      const slugCounts = new Map();
+      for (const heading of document.querySelectorAll('h1, h2, h3, h4, h5, h6')) {
+        if (heading.id) {
+          continue;
+        }
+
+        const baseSlug = createSlug(heading.textContent || '');
+        const index = slugCounts.get(baseSlug) || 0;
+        slugCounts.set(baseSlug, index + 1);
+        heading.id = index === 0 ? baseSlug : `${baseSlug}-${index + 1}`;
       }
 
       Prism.highlightAll();
@@ -1042,7 +1124,9 @@ p { color: #555; }
   private void ApplyHistoryPaneVisibility(bool isVisible) {
     HistoryToggleButton!.IsChecked = isVisible;
     HistoryColumn.Width = isVisible ? new GridLength(220) : new GridLength(0);
+    HistorySplitterColumn.Width = isVisible ? new GridLength(6) : new GridLength(0);
     HistoryListBox!.Visibility = isVisible ? Visibility.Visible : Visibility.Collapsed;
+    HistoryGridSplitter!.Visibility = isVisible ? Visibility.Visible : Visibility.Collapsed;
   }
 
   private void UpdateUnsafeHtmlToggleAppearance() {
@@ -1078,6 +1162,98 @@ p { color: #555; }
     HistoryListBox!.SelectedItem = historyItems.FirstOrDefault(x => string.Equals(x.FullPath, fullPath, StringComparison.OrdinalIgnoreCase));
 
     suppressHistorySelectionChanged = false;
+  }
+
+  private void UpdateOutline(string markdownText) {
+    outlineItems.Clear();
+
+    var slugCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+    using var reader = new StringReader(markdownText);
+    string? line;
+    var lineIndex = 0;
+
+    while((line = reader.ReadLine()) is not null) {
+      lineIndex++;
+      var match = AtxHeadingRegex.Match(line);
+      if(!match.Success) {
+        continue;
+      }
+
+      var level = match.Groups[1].Value.Length;
+      var title = match.Groups[2].Value.Trim();
+      if(string.IsNullOrWhiteSpace(title)) {
+        continue;
+      }
+
+      var baseSlug = CreateSlug(title);
+      slugCounts.TryGetValue(baseSlug, out var count);
+      slugCounts[baseSlug] = count + 1;
+      var slug = count == 0 ? baseSlug : $"{baseSlug}-{count + 1}";
+      outlineItems.Add(new OutlineItem(title, level, lineIndex, slug));
+    }
+  }
+
+  private async Task ScrollPreviewToHeadingAsync(string slug) {
+    if(MarkdownWebView.CoreWebView2 is null) {
+      return;
+    }
+
+    var slugJson = JsonSerializer.Serialize(slug);
+    await MarkdownWebView.CoreWebView2.ExecuteScriptAsync($$"""
+(() => {
+  const element = document.getElementById({{slugJson}});
+  if (!element) {
+    return false;
+  }
+
+  element.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  return true;
+})()
+""");
+  }
+
+  private void ScrollSourceToOutline(OutlineItem outline) {
+    var lineIndex = Math.Max(0, outline.LineNumber - 1);
+    if(lineIndex >= SourceTextBox.LineCount) {
+      return;
+    }
+
+    var characterIndex = SourceTextBox.GetCharacterIndexFromLineIndex(lineIndex);
+    if(characterIndex < 0) {
+      return;
+    }
+
+    SourceTextBox.Focus();
+    SourceTextBox.CaretIndex = characterIndex;
+    SourceTextBox.ScrollToLine(lineIndex);
+  }
+
+  private static string CreateSlug(string value) {
+    if(string.IsNullOrWhiteSpace(value)) {
+      return "section";
+    }
+
+    var normalized = value.Normalize(NormalizationForm.FormKC).Trim().ToLowerInvariant();
+    var builder = new StringBuilder(normalized.Length);
+    var previousWasHyphen = false;
+
+    foreach(var character in normalized) {
+      if(char.IsLetterOrDigit(character)) {
+        builder.Append(character);
+        previousWasHyphen = false;
+        continue;
+      }
+
+      if(char.IsWhiteSpace(character) || character == '-') {
+        if(builder.Length > 0 && !previousWasHyphen) {
+          builder.Append('-');
+          previousWasHyphen = true;
+        }
+      }
+    }
+
+    var slug = builder.ToString().Trim('-');
+    return string.IsNullOrWhiteSpace(slug) ? "section" : slug;
   }
 
   private void RefreshHistoryItemDisplayState() {
@@ -1192,5 +1368,25 @@ p { color: #555; }
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
+  }
+
+  private sealed class OutlineItem {
+    public OutlineItem(string title, int level, int lineNumber, string slug) {
+      Title = title;
+      Level = level;
+      LineNumber = lineNumber;
+      Slug = slug;
+      IndentPadding = new Thickness(Math.Max(0, (level - 1) * 14), 4, 10, 4);
+    }
+
+    public string Title { get; }
+
+    public int Level { get; }
+
+    public int LineNumber { get; }
+
+    public string Slug { get; }
+
+    public Thickness IndentPadding { get; }
   }
 }
