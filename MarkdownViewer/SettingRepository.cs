@@ -123,7 +123,9 @@ public sealed class SettingRepository {
 }
 
 public sealed class AppSettings {
+  public int DockLayoutVersion { get; set; }
   public List<string> History { get; set; } = [];
   public bool IsHistoryPaneVisible { get; set; } = true;
   public string EditorPath { get; set; } = string.Empty;
+  public string DockLayoutXml { get; set; } = string.Empty;
 }

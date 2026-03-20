@@ -3,6 +3,7 @@ using System.IO.Pipes;
 using System.Text.Json;
 using System.Threading;
 using System.Windows;
+using System.Windows.Threading;
 
 namespace MarkdownViewer;
 
@@ -25,7 +26,14 @@ public partial class App : Application {
       return;
     }
 
+    DispatcherUnhandledException += OnUnhandledException;
+
     StartPrimaryWindow(e, e.Args.FirstOrDefault());
+  }
+
+  private void OnUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e) {
+    var ex = e.Exception;
+    MessageBox.Show(ex.ToString());
   }
 
   private void StartPrimaryWindow(StartupEventArgs e, string? initialFilePath) {
