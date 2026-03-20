@@ -1,4 +1,5 @@
 using Microsoft.Web.WebView2.Core;
+using Microsoft.Web.WebView2.Wpf;
 using Microsoft.Win32;
 using System.Collections.ObjectModel;
 using System.Collections.Specialized;
@@ -13,10 +14,14 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using AvalonDock;
+using AvalonDock.Layout;
+using AvalonDock.Layout.Serialization;
 
 namespace MarkdownViewer;
 
 public partial class MainWindow : Window {
+  private const int CurrentDockLayoutVersion = 3;
   private const string VirtualHostName = "markdown.local";
   private const string VirtualHostBaseUri = "https://markdown.local/";
   private const string AssetHostName = "appassets.local";
@@ -26,14 +31,15 @@ public partial class MainWindow : Window {
 
   private readonly SettingRepository settingRepository = new();
   private readonly ObservableCollection<HistoryItem> historyItems = [];
+  private readonly ObservableCollection<DirectoryFileItem> directoryFileItems = [];
   private readonly ObservableCollection<OutlineItem> outlineItems = [];
+  private readonly Dictionary<string, MarkdownDocumentTab> openDocuments = new(StringComparer.OrdinalIgnoreCase);
   private static readonly Regex AtxHeadingRegex = new(@"^(#{1,6})\s+(.*?)\s*#*\s*$", RegexOptions.Compiled);
-  private string? currentMarkdownPath;
-  private string currentSourceText = string.Empty;
+  private CoreWebView2Environment? webViewEnvironment;
+  private string? startupFilePath;
   private string editorPath = string.Empty;
   private bool isUnsafeHtmlEnabled;
   private bool suppressHistorySelectionChanged;
-  private bool webViewEventsRegistered;
   private Point? historyDragStartPoint;
   private HistoryItem? draggedHistoryItem;
   private HistoryItem? dropIndicatorItem;
@@ -54,65 +60,87 @@ public partial class MainWindow : Window {
 
   public MainWindow(string? initialFilePath) {
     InitializeComponent();
+    startupFilePath = initialFilePath;
 
     CommandBindings.Add(new CommandBinding(ToggleHistoryPaneCommand, ToggleHistoryPaneCommand_Executed));
     CommandBindings.Add(new CommandBinding(ReloadMarkdownCommand, ReloadMarkdownCommand_Executed));
     InputBindings.Add(new KeyBinding(ToggleHistoryPaneCommand, new KeyGesture(Key.B, ModifierKeys.Control)));
     InputBindings.Add(new KeyBinding(ReloadMarkdownCommand, new KeyGesture(Key.R, ModifierKeys.Control)));
     HistoryListBox.ItemsSource = historyItems;
+    DirectoryFileListBox.ItemsSource = directoryFileItems;
     OutlineListBox.ItemsSource = outlineItems;
+    HistoryAnchorable.PropertyChanged += HistoryAnchorable_PropertyChanged;
     historyItems.CollectionChanged += HistoryItems_CollectionChanged;
     ApplySettings(settingRepository.Load());
-    ApplyViewMode();
-
-    if(!string.IsNullOrWhiteSpace(initialFilePath)) {
-      OpenMarkdownFile(initialFilePath, HistoryUpdateMode.AddOnly);
-    }
+    UpdateOutlineLayoutButtonAppearance();
   }
 
   private void HistoryItems_CollectionChanged(object? sender, NotifyCollectionChangedEventArgs e) {
     RefreshHistoryItemDisplayState();
   }
 
-  private async void Window_Loaded(object sender, RoutedEventArgs e) {
-    try {
-      var localAppDataPath = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-      var webViewUserDataFolder = Path.Combine(localAppDataPath, "MarkdownViewer", "WebView2");
-      Directory.CreateDirectory(webViewUserDataFolder);
-      var webViewEnvironment = await CoreWebView2Environment.CreateAsync(userDataFolder: webViewUserDataFolder);
-      await MarkdownWebView.EnsureCoreWebView2Async(webViewEnvironment);
-    } catch(Exception ex) {
-      MessageBox.Show($"WebView2 の初期化に失敗しました。{Environment.NewLine}{ex.Message}", "Markdown Viewer", MessageBoxButton.OK, MessageBoxImage.Error);
-      return;
+  private void OutlineAnchorable_PropertyChanged(object? sender, PropertyChangedEventArgs e) {
+    if(e.PropertyName is nameof(LayoutAnchorable.IsVisible) or nameof(LayoutAnchorable.IsAutoHidden) or nameof(LayoutAnchorable.IsHidden)) {
+      UpdateOutlineLayoutButtonAppearance();
     }
-
-    RegisterWebViewEvents();
-
-    if(currentMarkdownPath is null) {
-      if(TryOpenLatestHistory()) {
-        return;
-      }
-
-      if(TryOpenMarkdownByDialog()) {
-        return;
-      }
-
-      await RenderMessageAsync("表示する Markdown ファイルが指定されていません。", "コマンドライン引数にファイルパスを指定してください。");
-      return;
-    }
-
-    await RenderMarkdownFileAsync(currentMarkdownPath);
   }
 
-  private void RegisterWebViewEvents() {
-    if(webViewEventsRegistered || MarkdownWebView.CoreWebView2 is null) {
-      return;
+  private void HistoryAnchorable_PropertyChanged(object? sender, PropertyChangedEventArgs e) {
+    if(e.PropertyName is nameof(LayoutAnchorable.IsVisible) or nameof(LayoutAnchorable.IsAutoHidden) or nameof(LayoutAnchorable.IsHidden)) {
+      UpdateHistoryToggleState();
     }
+  }
 
-    ConfigureAssetHostMapping();
-    MarkdownWebView.CoreWebView2.NavigationStarting += CoreWebView2_NavigationStarting;
-    MarkdownWebView.CoreWebView2.NewWindowRequested += CoreWebView2_NewWindowRequested;
-    webViewEventsRegistered = true;
+  private async void Window_Loaded(object sender, RoutedEventArgs e) {
+    try {
+      try {
+        var localAppDataPath = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var webViewUserDataFolder = Path.Combine(localAppDataPath, "MarkdownViewer", "WebView2");
+        Directory.CreateDirectory(webViewUserDataFolder);
+        webViewEnvironment = await CoreWebView2Environment.CreateAsync(userDataFolder: webViewUserDataFolder);
+      } catch(Exception ex) {
+        MessageBox.Show($"WebView2 の初期化に失敗しました。{Environment.NewLine}{ex.Message}", "Markdown Viewer", MessageBoxButton.OK, MessageBoxImage.Error);
+        return;
+      }
+
+      var settings = settingRepository.Load();
+      var canRestoreLayout = settings.DockLayoutVersion == CurrentDockLayoutVersion;
+      if(!canRestoreLayout && !string.IsNullOrWhiteSpace(settings.DockLayoutXml)) {
+        ClearDockLayoutSetting();
+      }
+
+      var layoutLoaded = string.IsNullOrWhiteSpace(startupFilePath) && canRestoreLayout && await TryRestoreDockLayoutAsync(settings.DockLayoutXml);
+
+      if(!string.IsNullOrWhiteSpace(startupFilePath)) {
+        OpenMarkdownFile(startupFilePath, HistoryUpdateMode.AddOnly);
+        startupFilePath = null;
+        return;
+      }
+
+      if(!layoutLoaded || GetActiveDocumentTab() is null) {
+        if(TryOpenLatestHistory()) {
+          return;
+        }
+
+        if(TryOpenMarkdownByDialog()) {
+          return;
+        }
+      }
+    } catch(Exception ex) {
+      ClearDockLayoutSetting();
+      MessageBox.Show($"起動時のレイアウト復元に失敗したため、保存レイアウトを破棄して既定状態で起動してください。{Environment.NewLine}{ex.Message}", "Markdown Viewer", MessageBoxButton.OK, MessageBoxImage.Warning);
+    }
+  }
+
+  private void Window_Closing(object? sender, CancelEventArgs e) {
+    PersistWindowLayout();
+  }
+
+  private void ClearDockLayoutSetting() {
+    settingRepository.Update(settings => {
+      settings.DockLayoutXml = string.Empty;
+      settings.DockLayoutVersion = CurrentDockLayoutVersion;
+    });
   }
 
   private void CoreWebView2_NavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs e) {
@@ -185,11 +213,12 @@ public partial class MainWindow : Window {
   }
 
   private async void ReloadButton_Click(object sender, RoutedEventArgs e) {
-    if(currentMarkdownPath is null) {
+    var activeDocument = GetActiveDocumentTab();
+    if(activeDocument?.FullPath is null) {
       return;
     }
 
-    await RenderMarkdownFileAsync(currentMarkdownPath);
+    await RenderMarkdownFileAsync(activeDocument);
   }
 
   private void OpenFileButton_Click(object sender, RoutedEventArgs e) {
@@ -243,17 +272,50 @@ public partial class MainWindow : Window {
     MessageBox.Show($"リリースページを開けませんでした。{Environment.NewLine}{ReleasePageUrl}", "Markdown Viewer", MessageBoxButton.OK, MessageBoxImage.Error);
   }
 
+  private void CloseDocumentsToRightMenuItem_Click(object sender, RoutedEventArgs e) {
+    var targetDocument = GetLayoutDocumentFromMenuSender(sender);
+    var documentPane = targetDocument?.Parent as LayoutDocumentPane ?? GetDocumentPane();
+    if(targetDocument is null || documentPane is null) {
+      return;
+    }
+
+    var documentsToClose = documentPane.Children
+      .OfType<LayoutDocument>()
+      .SkipWhile(document => !ReferenceEquals(document, targetDocument))
+      .Skip(1)
+      .Where(document => document.CanClose)
+      .ToArray();
+
+    foreach(var document in documentsToClose) {
+      document.Close();
+    }
+  }
+
+  private void OpenDocumentInExplorerMenuItem_Click(object sender, RoutedEventArgs e) {
+    var targetDocument = GetLayoutDocumentFromMenuSender(sender);
+    if(string.IsNullOrWhiteSpace(targetDocument?.ContentId)) {
+      return;
+    }
+
+    OpenFileInExplorer(targetDocument.ContentId);
+  }
+
   private void SourceViewToggleButton_Click(object sender, RoutedEventArgs e) {
     currentViewMode = SourceViewToggleButton!.IsChecked == true ? ViewMode.Source : ViewMode.Preview;
     ApplyViewMode();
+  }
+
+  private void OutlineLayoutButton_Click(object sender, RoutedEventArgs e) {
+    ShowOutlinePane();
   }
 
   private async void UnsafeHtmlToggleButton_Click(object sender, RoutedEventArgs e) {
     isUnsafeHtmlEnabled = UnsafeHtmlToggleButton!.IsChecked == true;
     UpdateUnsafeHtmlToggleAppearance();
 
-    if(currentMarkdownPath is not null && MarkdownWebView!.CoreWebView2 is not null) {
-      await RenderMarkdownFileAsync(currentMarkdownPath);
+    var activeDocument = GetActiveDocumentTab();
+    if(activeDocument is not null) {
+      await RenderMarkdownFileAsync(activeDocument);
     }
   }
 
@@ -269,11 +331,12 @@ public partial class MainWindow : Window {
   }
 
   private async void ReloadMarkdownCommand_Executed(object sender, ExecutedRoutedEventArgs e) {
-    if(currentMarkdownPath is null) {
+    var activeDocument = GetActiveDocumentTab();
+    if(activeDocument?.FullPath is null) {
       return;
     }
 
-    await RenderMarkdownFileAsync(currentMarkdownPath);
+    await RenderMarkdownFileAsync(activeDocument);
   }
 
   private void HistoryListBox_SelectionChanged(object sender, SelectionChangedEventArgs e) {
@@ -281,11 +344,11 @@ public partial class MainWindow : Window {
       return;
     }
 
-    OpenMarkdownFile(selected.FullPath, HistoryUpdateMode.None);
+    OpenMarkdownFile(selected.FullPath, HistoryUpdateMode.None, focusDisplay: true);
   }
 
   private async void OutlineListBox_SelectionChanged(object sender, SelectionChangedEventArgs e) {
-    if(OutlineListBox.SelectedItem is not OutlineItem selected) {
+    if(sender is not ListBox listBox || listBox.SelectedItem is not OutlineItem selected) {
       return;
     }
 
@@ -296,7 +359,45 @@ public partial class MainWindow : Window {
         await ScrollPreviewToHeadingAsync(selected.Slug);
       }
     } finally {
-      OutlineListBox.SelectedItem = null;
+      listBox.SelectedItem = null;
+    }
+  }
+
+  private void DirectoryFileListBox_SelectionChanged(object sender, SelectionChangedEventArgs e) {
+    if(sender is not ListBox listBox || listBox.SelectedItem is not DirectoryFileItem selectedItem) {
+      return;
+    }
+
+    try {
+      if(selectedItem.IsMarkdownFile) {
+        OpenMarkdownFile(selectedItem.FullPath, HistoryUpdateMode.AddOrMove, focusDisplay: true);
+      }
+    } finally {
+      listBox.SelectedItem = null;
+    }
+  }
+
+  private void DirectoryFileListBoxItem_Loaded(object sender, RoutedEventArgs e) {
+    if(sender is not ListBoxItem item) {
+      return;
+    }
+
+    item.ContextMenu ??= BuildDirectoryFileItemContextMenu();
+  }
+
+  private void DirectoryFileListBoxItem_PreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e) {
+    if(sender is not ListBoxItem item || item.DataContext is not DirectoryFileItem) {
+      return;
+    }
+
+    e.Handled = true;
+    DirectoryFileListBox!.SelectedItem = item.DataContext;
+    item.Focus();
+
+    var contextMenu = item.ContextMenu;
+    if(contextMenu is not null) {
+      contextMenu.PlacementTarget = item;
+      contextMenu.IsOpen = true;
     }
   }
 
@@ -317,6 +418,10 @@ public partial class MainWindow : Window {
 
     historyDragStartPoint = e.GetPosition(HistoryListBox);
     draggedHistoryItem = historyItem;
+
+    if(openDocuments.TryGetValue(historyItem.FullPath, out var existingDocument)) {
+      ActivateDocumentTab(existingDocument, focusDisplay: true);
+    }
   }
 
   private void HistoryListBoxItem_PreviewMouseMove(object sender, MouseEventArgs e) {
@@ -377,7 +482,7 @@ public partial class MainWindow : Window {
       return;
     }
 
-    var targetContainer = ItemsControl.ContainerFromElement(HistoryListBox!, e.OriginalSource as DependencyObject) as ListBoxItem;
+    var targetContainer = TryGetHistoryListBoxItemFromOriginalSource(e.OriginalSource as DependencyObject);
     var targetItem = targetContainer?.DataContext as HistoryItem;
     var isAfter = targetContainer is not null && e.GetPosition(targetContainer).Y > targetContainer.ActualHeight / 2;
     UpdateDropIndicator(targetItem, isAfter);
@@ -398,7 +503,7 @@ public partial class MainWindow : Window {
         return;
       }
 
-      var targetContainer = ItemsControl.ContainerFromElement(HistoryListBox!, e.OriginalSource as DependencyObject) as ListBoxItem;
+      var targetContainer = TryGetHistoryListBoxItemFromOriginalSource(e.OriginalSource as DependencyObject);
       var targetItem = targetContainer?.DataContext as HistoryItem;
 
       var dropTarget = (IInputElement?)targetContainer ?? HistoryListBox!;
@@ -417,7 +522,7 @@ public partial class MainWindow : Window {
       return;
     }
 
-    var fileDropTargetContainer = ItemsControl.ContainerFromElement(HistoryListBox!, e.OriginalSource as DependencyObject) as ListBoxItem;
+    var fileDropTargetContainer = TryGetHistoryListBoxItemFromOriginalSource(e.OriginalSource as DependencyObject);
     var fileDropTargetItem = fileDropTargetContainer?.DataContext as HistoryItem;
     var insertIndex = GetDropInsertIndex(fileDropTargetItem, fileDropTargetContainer, e);
     InsertHistoryItems(droppedPaths, insertIndex);
@@ -500,8 +605,9 @@ public partial class MainWindow : Window {
     SaveHistory();
   }
 
-  private async void OpenMarkdownFile(string filePath, HistoryUpdateMode historyUpdateMode = HistoryUpdateMode.AddOrMove) {
+  private async void OpenMarkdownFile(string filePath, HistoryUpdateMode historyUpdateMode = HistoryUpdateMode.AddOrMove, bool focusDisplay = false) {
     var fullPath = Path.GetFullPath(filePath);
+    Debug.WriteLine($"[MarkdownViewer] OpenMarkdownFile start. Path={Path.GetFileName(fullPath)} FocusDisplay={focusDisplay}");
 
     if(!File.Exists(fullPath)) {
       var staleItem = historyItems.FirstOrDefault(x => string.Equals(x.FullPath, fullPath, StringComparison.OrdinalIgnoreCase));
@@ -514,16 +620,51 @@ public partial class MainWindow : Window {
       return;
     }
 
-    if(historyUpdateMode != HistoryUpdateMode.None && !string.Equals(currentMarkdownPath, fullPath, StringComparison.OrdinalIgnoreCase)) {
+    if(historyUpdateMode != HistoryUpdateMode.None && !string.Equals(GetActiveDocumentTab()?.FullPath, fullPath, StringComparison.OrdinalIgnoreCase)) {
       UpdateHistory(fullPath, historyUpdateMode);
     }
-    currentMarkdownPath = fullPath;
 
-    if(MarkdownWebView.CoreWebView2 is null) {
+    if(webViewEnvironment is null) {
+      startupFilePath = fullPath;
       return;
     }
 
-    await RenderMarkdownFileAsync(fullPath);
+    var isNewDocument = !openDocuments.ContainsKey(fullPath);
+    Debug.WriteLine($"[MarkdownViewer] OpenMarkdownFile before GetOrCreateDocumentTab. Path={Path.GetFileName(fullPath)} IsNewDocument={isNewDocument}");
+    var documentTab = GetOrCreateDocumentTab(fullPath);
+    if(documentTab is null) {
+      Debug.WriteLine($"[MarkdownViewer] OpenMarkdownFile aborted because documentTab is null. Path={Path.GetFileName(fullPath)}");
+      return;
+    }
+
+    var shouldFocusDisplay = focusDisplay || isNewDocument;
+    DebugLog(documentTab, $"OpenMarkdownFile after GetOrCreateDocumentTab. ShouldFocusDisplay={shouldFocusDisplay}");
+    ActivateDocumentTab(documentTab, focusDisplay: shouldFocusDisplay);
+    DebugLog(documentTab, "OpenMarkdownFile after first ActivateDocumentTab.");
+
+    if(!await EnsureDocumentInitializedAsync(documentTab)) {
+      DebugLog(documentTab, "OpenMarkdownFile aborted because document initialization failed.");
+      if(isNewDocument) {
+        GetDocumentPane()?.Children.Remove(documentTab.LayoutDocument);
+        openDocuments.Remove(fullPath);
+      }
+
+      return;
+    }
+
+    await RenderMarkdownFileAsync(documentTab);
+    DebugLog(documentTab, "OpenMarkdownFile after RenderMarkdownFileAsync.");
+    ActivateDocumentTab(documentTab, focusDisplay: shouldFocusDisplay);
+    DebugLog(documentTab, "OpenMarkdownFile after second ActivateDocumentTab.");
+
+    if(shouldFocusDisplay) {
+      _ = Dispatcher.BeginInvoke(
+        () => {
+          DebugLog(documentTab, "OpenMarkdownFile ContextIdle ActivateDocumentTab.");
+          ActivateDocumentTab(documentTab, focusDisplay: true);
+        },
+        System.Windows.Threading.DispatcherPriority.ContextIdle);
+    }
   }
 
   public void HandleActivationRequest(string? filePath) {
@@ -538,7 +679,7 @@ public partial class MainWindow : Window {
     Focus();
 
     if(!string.IsNullOrWhiteSpace(filePath)) {
-      OpenMarkdownFile(filePath, HistoryUpdateMode.AddOnly);
+      OpenMarkdownFile(filePath, HistoryUpdateMode.AddOnly, focusDisplay: true);
     }
   }
 
@@ -652,12 +793,74 @@ public partial class MainWindow : Window {
     return contextMenu;
   }
 
+  private ContextMenu BuildDirectoryFileItemContextMenu() {
+    var contextMenu = new ContextMenu();
+
+    var openInExplorerMenuItem = new MenuItem { Header = "エクスプローラで開く" };
+    openInExplorerMenuItem.Click += OpenDirectoryFileInExplorerMenuItem_Click;
+    contextMenu.Items.Add(openInExplorerMenuItem);
+
+    return contextMenu;
+  }
+
   private static HistoryItem? GetHistoryItemFromMenuSender(object sender) {
     if(sender is not MenuItem menuItem || menuItem.Parent is not ContextMenu contextMenu) {
       return null;
     }
 
     return (contextMenu.PlacementTarget as FrameworkElement)?.DataContext as HistoryItem;
+  }
+
+  private static DirectoryFileItem? GetDirectoryFileItemFromMenuSender(object sender) {
+    if(sender is not MenuItem menuItem || menuItem.Parent is not ContextMenu contextMenu) {
+      return null;
+    }
+
+    return (contextMenu.PlacementTarget as FrameworkElement)?.DataContext as DirectoryFileItem;
+  }
+
+  private static LayoutDocument? GetLayoutDocumentFromMenuSender(object sender) {
+    if(sender is not MenuItem menuItem) {
+      return null;
+    }
+
+    return TryExtractLayoutDocument(menuItem.CommandParameter)
+      ?? TryExtractLayoutDocument(menuItem.DataContext)
+      ?? TryExtractLayoutDocument((menuItem.Parent as ContextMenu)?.DataContext);
+  }
+
+  private static LayoutDocument? TryExtractLayoutDocument(object? candidate) {
+    return TryExtractLayoutDocument(candidate, new HashSet<object>(System.Collections.Generic.ReferenceEqualityComparer.Instance));
+  }
+
+  private static LayoutDocument? TryExtractLayoutDocument(object? candidate, HashSet<object> visited) {
+    if(candidate is null) {
+      return null;
+    }
+
+    if(candidate is LayoutDocument layoutDocument) {
+      return layoutDocument;
+    }
+
+    if(!visited.Add(candidate)) {
+      return null;
+    }
+
+    var candidateType = candidate.GetType();
+    foreach(var propertyName in new[] { "Model", "LayoutElement", "LayoutContent", "Content", "Root" }) {
+      var property = candidateType.GetProperty(propertyName);
+      if(property is null || property.GetIndexParameters().Length != 0) {
+        continue;
+      }
+
+      var value = property.GetValue(candidate);
+      var resolvedDocument = TryExtractLayoutDocument(value, visited);
+      if(resolvedDocument is not null) {
+        return resolvedDocument;
+      }
+    }
+
+    return null;
   }
 
   private IReadOnlyList<HistoryItem> GetHistoryItemsFromMenuSender(object sender) {
@@ -681,43 +884,55 @@ public partial class MainWindow : Window {
     return [contextItem];
   }
 
-  private async Task RenderMarkdownFileAsync(string filePath) {
-    if(MarkdownWebView.CoreWebView2 is null) {
+  private void OpenDirectoryFileInExplorerMenuItem_Click(object sender, RoutedEventArgs e) {
+    var selectedItem = GetDirectoryFileItemFromMenuSender(sender);
+    if(selectedItem is null) {
+      return;
+    }
+
+    OpenFileInExplorer(selectedItem.FullPath);
+  }
+
+  private async Task RenderMarkdownFileAsync(MarkdownDocumentTab documentTab) {
+    if(documentTab.WebView.CoreWebView2 is null) {
+      DebugLog(documentTab, "Render skipped because CoreWebView2 is null.");
       return;
     }
 
     string markdownText;
     try {
-      markdownText = await File.ReadAllTextAsync(filePath);
+      markdownText = await File.ReadAllTextAsync(documentTab.FullPath);
     } catch(Exception ex) {
-      await RenderMessageAsync("Markdown の読み込みに失敗しました。", ex.Message);
+      await RenderMessageAsync(documentTab, "Markdown の読み込みに失敗しました。", ex.Message);
       return;
     }
 
-    currentSourceText = markdownText;
-    SourceTextBox.Text = markdownText;
-    UpdateOutline(markdownText);
-    currentMarkdownPath = filePath;
-    PathTextBlock.Text = Path.GetFileName(filePath);
-    PathTextBlock.Foreground = new SolidColorBrush(Color.FromRgb(68, 68, 68));
+    documentTab.SourceText = markdownText;
+    documentTab.SourceTextBox.Text = markdownText;
+    documentTab.OutlineItems = BuildOutlineItems(markdownText);
+    documentTab.LayoutDocument.Title = Path.GetFileName(documentTab.FullPath);
 
-    var baseDirectory = Path.GetDirectoryName(filePath) ?? Environment.CurrentDirectory;
-    ConfigureVirtualHostMapping(baseDirectory);
+    var baseDirectory = Path.GetDirectoryName(documentTab.FullPath) ?? Environment.CurrentDirectory;
+    ConfigureVirtualHostMapping(documentTab.WebView, baseDirectory);
 
-    var html = BuildHtml(markdownText, VirtualHostBaseUri, Path.GetFileName(filePath), isUnsafeHtmlEnabled);
-    MarkdownWebView.NavigateToString(html);
+    var html = BuildHtml(markdownText, VirtualHostBaseUri, Path.GetFileName(documentTab.FullPath), isUnsafeHtmlEnabled);
+    DebugLog(documentTab, $"NavigateToString start. HtmlLength={html.Length}");
+    documentTab.WebView.NavigateToString(html);
+    documentTab.RequiresActivationRender = false;
+    DebugLog(documentTab, "NavigateToString submitted.");
 
-    SelectHistoryItem(filePath);
+    UpdateWindowForActiveDocument();
+    SelectHistoryItem(documentTab.FullPath);
   }
 
-  private async Task RenderMessageAsync(string title, string message) {
-    if(MarkdownWebView.CoreWebView2 is null) {
+  private async Task RenderMessageAsync(MarkdownDocumentTab documentTab, string title, string message) {
+    if(documentTab.WebView.CoreWebView2 is null) {
       return;
     }
 
-    currentSourceText = $"{title}{Environment.NewLine}{Environment.NewLine}{message}";
-    SourceTextBox.Text = currentSourceText;
-    outlineItems.Clear();
+    documentTab.SourceText = $"{title}{Environment.NewLine}{Environment.NewLine}{message}";
+    documentTab.SourceTextBox.Text = documentTab.SourceText;
+    documentTab.OutlineItems = [];
     var safeTitle = HtmlEncoder.Default.Encode(title);
     var safeMessage = HtmlEncoder.Default.Encode(message);
 
@@ -745,9 +960,10 @@ p { color: #555; }
 </html>
 """;
 
-    MarkdownWebView.NavigateToString(html);
-    PathTextBlock.Text = title;
-    PathTextBlock.Foreground = new SolidColorBrush(Color.FromRgb(180, 40, 40));
+    documentTab.LayoutDocument.Title = title;
+    documentTab.WebView.NavigateToString(html);
+    documentTab.RequiresActivationRender = false;
+    UpdateWindowForActiveDocument();
 
     await Task.CompletedTask;
   }
@@ -920,25 +1136,25 @@ p { color: #555; }
 """;
   }
 
-  private void ConfigureVirtualHostMapping(string folderPath) {
-    if(MarkdownWebView.CoreWebView2 is null) {
+  private void ConfigureVirtualHostMapping(WebView2 webView, string folderPath) {
+    if(webView.CoreWebView2 is null) {
       return;
     }
 
     var fullFolderPath = Path.GetFullPath(folderPath);
-    MarkdownWebView.CoreWebView2.SetVirtualHostNameToFolderMapping(
+    webView.CoreWebView2.SetVirtualHostNameToFolderMapping(
       VirtualHostName,
       fullFolderPath,
       CoreWebView2HostResourceAccessKind.Allow);
   }
 
-  private void ConfigureAssetHostMapping() {
-    if(MarkdownWebView.CoreWebView2 is null) {
+  private void ConfigureAssetHostMapping(WebView2 webView) {
+    if(webView.CoreWebView2 is null) {
       return;
     }
 
     var assetsFolderPath = Path.Combine(AppContext.BaseDirectory, "Assets");
-    MarkdownWebView.CoreWebView2.SetVirtualHostNameToFolderMapping(
+    webView.CoreWebView2.SetVirtualHostNameToFolderMapping(
       AssetHostName,
       assetsFolderPath,
       CoreWebView2HostResourceAccessKind.Allow);
@@ -1082,8 +1298,18 @@ p { color: #555; }
       settings.History = localHistory;
       settings.IsHistoryPaneVisible = HistoryToggleButton!.IsChecked == true;
     });
+  }
 
-    (Application.Current as App)?.RefreshAllWindowsFromSettings();
+  private ListBoxItem? TryGetHistoryListBoxItemFromOriginalSource(DependencyObject? originalSource) {
+    if(originalSource is null) {
+      return null;
+    }
+
+    try {
+      return ItemsControl.ContainerFromElement(HistoryListBox!, originalSource) as ListBoxItem;
+    } catch {
+      return null;
+    }
   }
 
   internal void ApplySettings(AppSettings settings) {
@@ -1092,6 +1318,7 @@ p { color: #555; }
     try {
       editorPath = EditorPathResolver.Resolve(settings.EditorPath);
       ApplyHistoryPaneVisibility(settings.IsHistoryPaneVisible);
+      UpdateHistoryToggleState();
       UnsafeHtmlToggleButton!.IsChecked = isUnsafeHtmlEnabled;
       UpdateUnsafeHtmlToggleAppearance();
 
@@ -1126,11 +1353,49 @@ p { color: #555; }
   }
 
   private void ApplyHistoryPaneVisibility(bool isVisible) {
+    var historyAnchorable = GetHistoryAnchorable();
+    if(historyAnchorable is null) {
+      HistoryToggleButton!.IsChecked = isVisible;
+      return;
+    }
+
+    if(isVisible) {
+      historyAnchorable.Show();
+      historyAnchorable.IsSelected = true;
+    } else {
+      historyAnchorable.Hide();
+    }
+
+    UpdateHistoryToggleState();
+  }
+
+  private void UpdateOutlineLayoutButtonAppearance() {
+    var outlineAnchorable = GetOutlineAnchorable();
+    var isVisible = outlineAnchorable?.IsVisible == true || outlineAnchorable?.IsAutoHidden == true;
+    OutlineLayoutIconTextBlock!.Foreground = isVisible
+      ? new SolidColorBrush(Color.FromRgb(37, 99, 235))
+      : new SolidColorBrush(Color.FromRgb(140, 140, 140));
+    OutlineLayoutButton!.ToolTip = isVisible
+      ? "アウトラインを表示してアクティブ化"
+      : "アウトラインを再表示";
+  }
+
+  private void ShowOutlinePane() {
+    var outlineAnchorable = GetOutlineAnchorable();
+    if(outlineAnchorable is null) {
+      return;
+    }
+
+    outlineAnchorable.Show();
+    outlineAnchorable.IsSelected = true;
+    outlineAnchorable.IsActive = true;
+    UpdateOutlineLayoutButtonAppearance();
+  }
+
+  private void UpdateHistoryToggleState() {
+    var historyAnchorable = GetHistoryAnchorable();
+    var isVisible = historyAnchorable?.IsVisible == true || historyAnchorable?.IsAutoHidden == true;
     HistoryToggleButton!.IsChecked = isVisible;
-    HistoryColumn.Width = isVisible ? new GridLength(220) : new GridLength(0);
-    HistorySplitterColumn.Width = isVisible ? new GridLength(6) : new GridLength(0);
-    HistoryListBox!.Visibility = isVisible ? Visibility.Visible : Visibility.Collapsed;
-    HistoryGridSplitter!.Visibility = isVisible ? Visibility.Visible : Visibility.Collapsed;
   }
 
   private void UpdateUnsafeHtmlToggleAppearance() {
@@ -1144,9 +1409,13 @@ p { color: #555; }
 
   private void ApplyViewMode() {
     var isSourceMode = currentViewMode == ViewMode.Source;
-    MarkdownWebView.Visibility = isSourceMode ? Visibility.Collapsed : Visibility.Visible;
-    SourceTextBox.Visibility = isSourceMode ? Visibility.Visible : Visibility.Collapsed;
-    SourceTextBox.Text = currentSourceText;
+
+    foreach(var documentTab in openDocuments.Values) {
+      documentTab.WebView.Visibility = isSourceMode ? Visibility.Collapsed : Visibility.Visible;
+      documentTab.SourceTextBox.Visibility = isSourceMode ? Visibility.Visible : Visibility.Collapsed;
+      documentTab.SourceTextBox.Text = documentTab.SourceText;
+    }
+
     UpdateSourceViewToggleAppearance();
   }
 
@@ -1168,9 +1437,8 @@ p { color: #555; }
     suppressHistorySelectionChanged = false;
   }
 
-  private void UpdateOutline(string markdownText) {
-    outlineItems.Clear();
-
+  private List<OutlineItem> BuildOutlineItems(string markdownText) {
+    var items = new List<OutlineItem>();
     var slugCounts = new Dictionary<string, int>(StringComparer.Ordinal);
     using var reader = new StringReader(markdownText);
     string? line;
@@ -1193,17 +1461,20 @@ p { color: #555; }
       slugCounts.TryGetValue(baseSlug, out var count);
       slugCounts[baseSlug] = count + 1;
       var slug = count == 0 ? baseSlug : $"{baseSlug}-{count + 1}";
-      outlineItems.Add(new OutlineItem(title, level, lineIndex, slug));
+      items.Add(new OutlineItem(title, level, lineIndex, slug));
     }
+
+    return items;
   }
 
   private async Task ScrollPreviewToHeadingAsync(string slug) {
-    if(MarkdownWebView.CoreWebView2 is null) {
+    var activeDocument = GetActiveDocumentTab();
+    if(activeDocument?.WebView.CoreWebView2 is null) {
       return;
     }
 
     var slugJson = JsonSerializer.Serialize(slug);
-    await MarkdownWebView.CoreWebView2.ExecuteScriptAsync($$"""
+    await activeDocument.WebView.CoreWebView2.ExecuteScriptAsync($$"""
 (() => {
   const element = document.getElementById({{slugJson}});
   if (!element) {
@@ -1217,19 +1488,446 @@ p { color: #555; }
   }
 
   private void ScrollSourceToOutline(OutlineItem outline) {
-    var lineIndex = Math.Max(0, outline.LineNumber - 1);
-    if(lineIndex >= SourceTextBox.LineCount) {
+    var activeDocument = GetActiveDocumentTab();
+    if(activeDocument is null) {
       return;
     }
 
-    var characterIndex = SourceTextBox.GetCharacterIndexFromLineIndex(lineIndex);
+    var lineIndex = Math.Max(0, outline.LineNumber - 1);
+    if(lineIndex >= activeDocument.SourceTextBox.LineCount) {
+      return;
+    }
+
+    var characterIndex = activeDocument.SourceTextBox.GetCharacterIndexFromLineIndex(lineIndex);
     if(characterIndex < 0) {
       return;
     }
 
-    SourceTextBox.Focus();
-    SourceTextBox.CaretIndex = characterIndex;
-    SourceTextBox.ScrollToLine(lineIndex);
+    activeDocument.SourceTextBox.Focus();
+    activeDocument.SourceTextBox.CaretIndex = characterIndex;
+    activeDocument.SourceTextBox.ScrollToLine(lineIndex);
+  }
+
+  private MarkdownDocumentTab? GetOrCreateDocumentTab(string fullPath) {
+    if(openDocuments.TryGetValue(fullPath, out var existingDocument)) {
+      DebugLog(existingDocument, "GetOrCreateDocumentTab found existing document.");
+      return existingDocument;
+    }
+
+    if(webViewEnvironment is null) {
+      Debug.WriteLine($"[MarkdownViewer] GetOrCreateDocumentTab aborted because webViewEnvironment is null. Path={Path.GetFileName(fullPath)}");
+      return null;
+    }
+
+    var documentView = CreateDocumentView();
+    var document = new LayoutDocument {
+      Title = Path.GetFileName(fullPath),
+      ContentId = fullPath,
+      Content = documentView.Root
+    };
+
+    var documentTab = new MarkdownDocumentTab(fullPath, document, documentView.Root, documentView.WebView, documentView.SourceTextBox);
+    openDocuments[fullPath] = documentTab;
+    DebugLog(documentTab, "GetOrCreateDocumentTab created new document tab.");
+    GetDocumentPane()?.Children.Add(document);
+    DebugLog(documentTab, "GetOrCreateDocumentTab added document to pane.");
+    return documentTab;
+  }
+
+  private async Task<bool> EnsureDocumentInitializedAsync(MarkdownDocumentTab documentTab) {
+    if(documentTab.IsInitialized) {
+      DebugLog(documentTab, "EnsureDocumentInitializedAsync skipped because already initialized.");
+      return true;
+    }
+
+    if(documentTab.InitializationTask is not null) {
+      DebugLog(documentTab, "EnsureDocumentInitializedAsync awaiting existing initialization task.");
+      return await documentTab.InitializationTask;
+    }
+
+    if(webViewEnvironment is null) {
+      DebugLog(documentTab, "EnsureDocumentInitializedAsync aborted because webViewEnvironment is null.");
+      return false;
+    }
+
+    documentTab.InitializationTask = EnsureDocumentInitializedCoreAsync(documentTab);
+    try {
+      return await documentTab.InitializationTask;
+    } finally {
+      documentTab.InitializationTask = null;
+    }
+  }
+
+  private async Task<bool> EnsureDocumentInitializedCoreAsync(MarkdownDocumentTab documentTab) {
+    try {
+      DebugLog(documentTab, "Before EnsureCoreWebView2Async.");
+      await documentTab.WebView.EnsureCoreWebView2Async(webViewEnvironment);
+      DebugLog(documentTab, $"After EnsureCoreWebView2Async. CoreWebView2Null={documentTab.WebView.CoreWebView2 is null}");
+    } catch(Exception ex) {
+      DebugLog(documentTab, $"EnsureCoreWebView2Async failed: {ex}");
+      MessageBox.Show($"WebView2 の初期化に失敗しました。{Environment.NewLine}{ex.Message}", "Markdown Viewer", MessageBoxButton.OK, MessageBoxImage.Error);
+      return false;
+    }
+
+    RegisterWebViewEvents(documentTab.WebView);
+    documentTab.IsInitialized = true;
+    ApplyViewMode();
+    return true;
+  }
+
+  private void RegisterWebViewEvents(WebView2 webView) {
+    if(webView.CoreWebView2 is null) {
+      return;
+    }
+
+    ConfigureAssetHostMapping(webView);
+    webView.CoreWebView2.NavigationStarting += CoreWebView2_NavigationStarting;
+    webView.CoreWebView2.NavigationCompleted += CoreWebView2_NavigationCompleted;
+    webView.CoreWebView2.NewWindowRequested += CoreWebView2_NewWindowRequested;
+  }
+
+  private static DocumentView CreateDocumentView() {
+    var root = new Grid();
+
+    var webView = new WebView2();
+    root.Children.Add(webView);
+
+    var sourceTextBox = new TextBox {
+      Visibility = Visibility.Collapsed,
+      IsReadOnly = true,
+      AcceptsReturn = true,
+      AcceptsTab = true,
+      TextWrapping = TextWrapping.NoWrap,
+      HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+      VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+      BorderThickness = new Thickness(0),
+      Background = new SolidColorBrush(Color.FromRgb(255, 255, 255)),
+      Foreground = new SolidColorBrush(Color.FromRgb(30, 30, 30)),
+      Padding = new Thickness(16),
+      FontFamily = new FontFamily("Consolas"),
+      FontSize = 13
+    };
+    root.Children.Add(sourceTextBox);
+
+    return new DocumentView(root, webView, sourceTextBox);
+  }
+
+  private void ActivateDocumentTab(MarkdownDocumentTab documentTab, bool focusDisplay = false) {
+    ApplyDocumentActivation(documentTab, focusDisplay);
+    _ = Dispatcher.BeginInvoke(
+      () => ApplyDocumentActivation(documentTab, focusDisplay),
+      System.Windows.Threading.DispatcherPriority.Background);
+  }
+
+  private void ApplyDocumentActivation(MarkdownDocumentTab documentTab, bool focusDisplay) {
+    var documentPane = documentTab.LayoutDocument.Parent as LayoutDocumentPane ?? GetDocumentPane();
+    if(documentPane is not null) {
+      var documentIndex = documentPane.Children.IndexOf(documentTab.LayoutDocument);
+      if(documentIndex >= 0) {
+        documentPane.SelectedContentIndex = documentIndex;
+      }
+    }
+
+    documentTab.LayoutDocument.IsSelected = true;
+    documentTab.LayoutDocument.IsActive = true;
+    MainDockingManager.ActiveContent = documentTab.Root;
+    UpdateWindowForActiveDocument();
+
+    if(focusDisplay) {
+      FocusDocumentDisplay(documentTab);
+    }
+  }
+
+  private void FocusDocumentDisplay(MarkdownDocumentTab documentTab) {
+    if(currentViewMode == ViewMode.Source) {
+      documentTab.SourceTextBox.Focus();
+      Keyboard.Focus(documentTab.SourceTextBox);
+      return;
+    }
+
+    documentTab.WebView.Focus();
+    Keyboard.Focus(documentTab.WebView);
+  }
+
+  private MarkdownDocumentTab? GetActiveDocumentTab() {
+    if(MainDockingManager.ActiveContent is not FrameworkElement activeContent) {
+      return GetFocusedOrSelectedDocumentTab();
+    }
+
+    return openDocuments.Values.FirstOrDefault(documentTab => ReferenceEquals(documentTab.Root, activeContent))
+      ?? GetFocusedOrSelectedDocumentTab();
+  }
+
+  private MarkdownDocumentTab? GetFocusedOrSelectedDocumentTab() {
+    var activeLayoutDocument = openDocuments.Values
+      .Select(documentTab => documentTab.LayoutDocument)
+      .FirstOrDefault(layoutDocument => layoutDocument.IsActive || layoutDocument.IsSelected);
+
+    if(activeLayoutDocument is null) {
+      return null;
+    }
+
+    return openDocuments.Values.FirstOrDefault(documentTab => ReferenceEquals(documentTab.LayoutDocument, activeLayoutDocument));
+  }
+
+  private void UpdateWindowForActiveDocument() {
+    var activeDocument = GetActiveDocumentTab();
+    if(activeDocument is null) {
+      directoryFileItems.Clear();
+      outlineItems.Clear();
+      PathTextBlock.Text = string.Empty;
+      PathTextBlock.Foreground = new SolidColorBrush(Color.FromRgb(68, 68, 68));
+      suppressHistorySelectionChanged = true;
+      HistoryListBox!.SelectedItem = null;
+      suppressHistorySelectionChanged = false;
+      UpdateOutlineLayoutButtonAppearance();
+      return;
+    }
+
+    RefreshDirectoryFileItems(activeDocument.FullPath);
+    outlineItems.Clear();
+    foreach(var item in activeDocument.OutlineItems) {
+      outlineItems.Add(item);
+    }
+
+    PathTextBlock.Text = Path.GetFileName(activeDocument.FullPath);
+    PathTextBlock.Foreground = new SolidColorBrush(Color.FromRgb(68, 68, 68));
+    SelectHistoryItem(activeDocument.FullPath);
+    UpdateOutlineLayoutButtonAppearance();
+  }
+
+  private async void MainDockingManager_ActiveContentChanged(object sender, EventArgs e) {
+    var activeDocument = GetActiveDocumentTab();
+    if(activeDocument is not null) {
+      DebugLog(activeDocument, $"ActiveContentChanged. RequiresActivationRender={activeDocument.RequiresActivationRender}");
+    } else {
+      Debug.WriteLine("[MarkdownViewer] ActiveContentChanged. No active document.");
+    }
+
+    if(activeDocument is not null && !activeDocument.IsInitialized) {
+      if(!await EnsureDocumentInitializedAsync(activeDocument)) {
+        UpdateWindowForActiveDocument();
+        return;
+      }
+    }
+
+    if(activeDocument?.RequiresActivationRender == true) {
+      activeDocument.RequiresActivationRender = false;
+      await RenderMarkdownFileAsync(activeDocument);
+    }
+
+    UpdateWindowForActiveDocument();
+  }
+
+  private void MainDockingManager_DocumentClosed(object sender, EventArgs e) {
+    var closedDocuments = openDocuments
+      .Where(entry => GetDocumentPane()?.Children.Contains(entry.Value.LayoutDocument) != true)
+      .Select(entry => entry.Key)
+      .ToArray();
+
+    foreach(var path in closedDocuments) {
+      openDocuments.Remove(path);
+    }
+
+    UpdateWindowForActiveDocument();
+  }
+
+  private LayoutAnchorable? GetOutlineAnchorable() {
+    return MainDockingManager.Layout.Descendents().OfType<LayoutAnchorable>().FirstOrDefault(item => string.Equals(item.ContentId, "OutlinePane", StringComparison.Ordinal));
+  }
+
+  private LayoutAnchorable? GetFilesAnchorable() {
+    return MainDockingManager.Layout.Descendents().OfType<LayoutAnchorable>().FirstOrDefault(item => string.Equals(item.ContentId, "FilesPane", StringComparison.Ordinal));
+  }
+
+  private LayoutAnchorable? GetHistoryAnchorable() {
+    return MainDockingManager.Layout.Descendents().OfType<LayoutAnchorable>().FirstOrDefault(item => string.Equals(item.ContentId, "HistoryPane", StringComparison.Ordinal));
+  }
+
+  private LayoutDocumentPane? GetDocumentPane() {
+    return MainDockingManager.Layout.Descendents().OfType<LayoutDocumentPane>().FirstOrDefault();
+  }
+
+  private async Task<bool> TryRestoreDockLayoutAsync(string? dockLayoutXml) {
+    if(string.IsNullOrWhiteSpace(dockLayoutXml)) {
+      return false;
+    }
+
+    DetachElementFromParent(HistoryListBox);
+    DetachElementFromParent(DirectoryFileListBox);
+    DetachElementFromParent(OutlineListBox);
+
+    foreach(var document in openDocuments.Values) {
+      DetachElementFromParent(document.Root);
+    }
+
+    openDocuments.Clear();
+
+    try {
+      var serializer = new XmlLayoutSerializer(MainDockingManager);
+      serializer.LayoutSerializationCallback += LayoutSerializer_LayoutSerializationCallback;
+
+      using var reader = new StringReader(dockLayoutXml);
+      serializer.Deserialize(reader);
+    } catch {
+      openDocuments.Clear();
+      settingRepository.Update(settings => {
+        settings.DockLayoutXml = string.Empty;
+        settings.DockLayoutVersion = CurrentDockLayoutVersion;
+      });
+      return false;
+    }
+
+    var loadedDocuments = openDocuments.Values.ToArray();
+    var activeDocument = GetRestoredActiveDocumentTab(loadedDocuments);
+    if(activeDocument is not null) {
+      if(!await EnsureDocumentInitializedAsync(activeDocument)) {
+        return false;
+      }
+
+      await RenderMarkdownFileAsync(activeDocument);
+    }
+
+    foreach(var documentTab in loadedDocuments) {
+      if(ReferenceEquals(documentTab, activeDocument)) {
+        continue;
+      }
+
+      documentTab.RequiresActivationRender = true;
+    }
+
+    var outlineAnchorable = GetOutlineAnchorable();
+    if(outlineAnchorable is not null) {
+      outlineAnchorable.PropertyChanged += OutlineAnchorable_PropertyChanged;
+    }
+
+    var historyAnchorable = GetHistoryAnchorable();
+    if(historyAnchorable is not null) {
+      historyAnchorable.PropertyChanged += HistoryAnchorable_PropertyChanged;
+    }
+
+    ApplyViewMode();
+    if(activeDocument is not null) {
+      ActivateDocumentTab(activeDocument);
+      _ = Dispatcher.BeginInvoke(
+        () => ActivateDocumentTab(activeDocument, focusDisplay: true),
+        System.Windows.Threading.DispatcherPriority.ContextIdle);
+    }
+
+    UpdateHistoryToggleState();
+    UpdateWindowForActiveDocument();
+    return loadedDocuments.Length > 0;
+  }
+
+  private void LayoutSerializer_LayoutSerializationCallback(object? sender, LayoutSerializationCallbackEventArgs e) {
+    switch(e.Model) {
+      case LayoutAnchorable anchorable when string.Equals(anchorable.ContentId, "HistoryPane", StringComparison.Ordinal):
+        anchorable.PropertyChanged -= HistoryAnchorable_PropertyChanged;
+        anchorable.PropertyChanged += HistoryAnchorable_PropertyChanged;
+        DetachElementFromParent(HistoryListBox);
+        e.Content = HistoryListBox;
+        break;
+      case LayoutAnchorable anchorable when string.Equals(anchorable.ContentId, "FilesPane", StringComparison.Ordinal):
+        DetachElementFromParent(DirectoryFileListBox);
+        e.Content = DirectoryFileListBox;
+        break;
+      case LayoutAnchorable anchorable when string.Equals(anchorable.ContentId, "OutlinePane", StringComparison.Ordinal):
+        anchorable.PropertyChanged -= OutlineAnchorable_PropertyChanged;
+        anchorable.PropertyChanged += OutlineAnchorable_PropertyChanged;
+        DetachElementFromParent(OutlineListBox);
+        e.Content = OutlineListBox;
+        break;
+      case LayoutDocument layoutDocument when !string.IsNullOrWhiteSpace(layoutDocument.ContentId):
+        var fullPath = Path.GetFullPath(layoutDocument.ContentId);
+        if(!File.Exists(fullPath)) {
+          e.Cancel = true;
+          return;
+        }
+
+        if(openDocuments.TryGetValue(fullPath, out var existingDocument)) {
+          existingDocument.LayoutDocument = layoutDocument;
+          DetachElementFromParent(existingDocument.Root);
+          layoutDocument.Content = existingDocument.Root;
+          e.Content = existingDocument.Root;
+          return;
+        }
+
+        var documentView = CreateDocumentView();
+        var documentTab = new MarkdownDocumentTab(fullPath, layoutDocument, documentView.Root, documentView.WebView, documentView.SourceTextBox);
+        openDocuments[fullPath] = documentTab;
+        e.Content = documentView.Root;
+        break;
+    }
+  }
+
+  private void PersistWindowLayout() {
+    var dockLayoutXml = CaptureDockLayout();
+    var localHistory = historyItems.Select(item => item.FullPath).ToList();
+
+    settingRepository.Update(settings => {
+      settings.History = localHistory;
+      settings.IsHistoryPaneVisible = HistoryToggleButton!.IsChecked == true;
+      settings.DockLayoutXml = dockLayoutXml;
+      settings.DockLayoutVersion = CurrentDockLayoutVersion;
+    });
+  }
+
+  private static void DetachElementFromParent(FrameworkElement? element) {
+    if(element is null) {
+      return;
+    }
+
+    var parent = LogicalTreeHelper.GetParent(element) ?? VisualTreeHelper.GetParent(element);
+    switch(parent) {
+      case Panel panel:
+        panel.Children.Remove(element);
+        break;
+      case Decorator decorator when ReferenceEquals(decorator.Child, element):
+        decorator.Child = null;
+        break;
+      case ContentPresenter presenter when ReferenceEquals(presenter.Content, element):
+        presenter.Content = null;
+        break;
+      case ContentControl control when ReferenceEquals(control.Content, element):
+        control.Content = null;
+        break;
+    }
+  }
+
+  private void CoreWebView2_NavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs e) {
+    if(sender is not CoreWebView2 coreWebView) {
+      Debug.WriteLine($"[MarkdownViewer] NavigationCompleted. SenderType={sender?.GetType().FullName ?? "null"} Success={e.IsSuccess} Status={e.WebErrorStatus}");
+      return;
+    }
+
+    var documentTab = openDocuments.Values.FirstOrDefault(tab => ReferenceEquals(tab.WebView.CoreWebView2, coreWebView));
+    if(documentTab is null) {
+      Debug.WriteLine($"[MarkdownViewer] NavigationCompleted. Untracked WebView. Success={e.IsSuccess} Status={e.WebErrorStatus}");
+      return;
+    }
+
+    DebugLog(documentTab, $"NavigationCompleted. Success={e.IsSuccess} Status={e.WebErrorStatus}");
+  }
+
+  private static void DebugLog(MarkdownDocumentTab documentTab, string message) {
+    Debug.WriteLine($"[MarkdownViewer] {Path.GetFileName(documentTab.FullPath)} | {message}");
+  }
+
+  private static MarkdownDocumentTab? GetRestoredActiveDocumentTab(IReadOnlyList<MarkdownDocumentTab> loadedDocuments) {
+    return loadedDocuments.FirstOrDefault(document => document.LayoutDocument.IsActive)
+      ?? loadedDocuments.FirstOrDefault(document => document.LayoutDocument.IsSelected)
+      ?? loadedDocuments.FirstOrDefault();
+  }
+
+  private string CaptureDockLayout() {
+    try {
+      var serializer = new XmlLayoutSerializer(MainDockingManager);
+      using var writer = new StringWriter();
+      serializer.Serialize(writer);
+      return writer.ToString();
+    } catch {
+      return string.Empty;
+    }
   }
 
   private static string CreateSlug(string value) {
@@ -1318,6 +2016,28 @@ p { color: #555; }
     return string.Join(Path.DirectorySeparatorChar, segments.Skip(Math.Max(0, segments.Count - count)));
   }
 
+  private void RefreshDirectoryFileItems(string fullPath) {
+    directoryFileItems.Clear();
+
+    var directoryPath = Path.GetDirectoryName(fullPath);
+    if(string.IsNullOrWhiteSpace(directoryPath) || !Directory.Exists(directoryPath)) {
+      return;
+    }
+
+    IEnumerable<string> entries;
+    try {
+      entries = Directory.EnumerateFileSystemEntries(directoryPath);
+    } catch {
+      return;
+    }
+
+    foreach(var entry in entries
+      .Where(path => File.Exists(path) && IsMarkdownPath(path))
+      .OrderBy(path => Path.GetFileName(path), StringComparer.OrdinalIgnoreCase)) {
+      directoryFileItems.Add(new DirectoryFileItem(entry, fullPath));
+    }
+  }
+
   private sealed class HistoryItem : INotifyPropertyChanged {
     private string secondaryText = string.Empty;
     private bool isDropTargetBefore;
@@ -1374,6 +2094,43 @@ p { color: #555; }
     public event PropertyChangedEventHandler? PropertyChanged;
   }
 
+  private sealed class DirectoryFileItem {
+    public DirectoryFileItem(string fullPath, string activeDocumentPath) {
+      FullPath = fullPath;
+      IsMarkdownFile = IsMarkdownPath(fullPath);
+      IsActiveDocument = string.Equals(Path.GetFullPath(fullPath), Path.GetFullPath(activeDocumentPath), StringComparison.OrdinalIgnoreCase);
+
+      var fileName = Path.GetFileName(fullPath);
+      DisplayName = fileName;
+
+      if(IsActiveDocument) {
+        SecondaryText = "現在表示中";
+      } else if(IsMarkdownFile) {
+        SecondaryText = "Markdown";
+      } else {
+        SecondaryText = Path.GetExtension(fullPath);
+      }
+    }
+
+    public string DisplayName { get; }
+
+    public string FullPath { get; }
+
+    public string SecondaryText { get; }
+
+    public bool IsMarkdownFile { get; }
+
+    public bool IsActiveDocument { get; }
+
+    public Visibility SecondaryTextVisibility => string.IsNullOrWhiteSpace(SecondaryText) ? Visibility.Collapsed : Visibility.Visible;
+  }
+
+  private static bool IsMarkdownPath(string fullPath) {
+    var extension = Path.GetExtension(fullPath);
+    return string.Equals(extension, ".md", StringComparison.OrdinalIgnoreCase)
+      || string.Equals(extension, ".markdown", StringComparison.OrdinalIgnoreCase);
+  }
+
   private sealed class OutlineItem {
     public OutlineItem(string title, int level, int lineNumber, string slug) {
       Title = title;
@@ -1392,5 +2149,49 @@ p { color: #555; }
     public string Slug { get; }
 
     public Thickness IndentPadding { get; }
+  }
+
+  private sealed class MarkdownDocumentTab {
+    public MarkdownDocumentTab(string fullPath, LayoutDocument layoutDocument, Grid root, WebView2 webView, TextBox sourceTextBox) {
+      FullPath = fullPath;
+      LayoutDocument = layoutDocument;
+      Root = root;
+      WebView = webView;
+      SourceTextBox = sourceTextBox;
+    }
+
+    public string FullPath { get; }
+
+    public LayoutDocument LayoutDocument { get; set; }
+
+    public Grid Root { get; }
+
+    public WebView2 WebView { get; }
+
+    public TextBox SourceTextBox { get; }
+
+    public string SourceText { get; set; } = string.Empty;
+
+    public List<OutlineItem> OutlineItems { get; set; } = [];
+
+    public bool IsInitialized { get; set; }
+
+    public bool RequiresActivationRender { get; set; }
+
+    public Task<bool>? InitializationTask { get; set; }
+  }
+
+  private sealed class DocumentView {
+    public DocumentView(Grid root, WebView2 webView, TextBox sourceTextBox) {
+      Root = root;
+      WebView = webView;
+      SourceTextBox = sourceTextBox;
+    }
+
+    public Grid Root { get; }
+
+    public WebView2 WebView { get; }
+
+    public TextBox SourceTextBox { get; }
   }
 }
