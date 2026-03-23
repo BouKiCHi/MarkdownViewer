@@ -62,10 +62,10 @@
         </DataTemplate>
 
         <DataTemplate x:Key="DocumentHeaderTemplate">
-            <Border Padding="16,4">
+            <Border Padding="12,3">
                 <TextBlock Text="{Binding Title}"
-                           TextAlignment="Center"
                            HorizontalAlignment="Center"
+                           TextAlignment="Center"
                            TextTrimming="CharacterEllipsis" />
             </Border>
         </DataTemplate>
@@ -170,9 +170,9 @@
                             Height="32"
                             Click="GoToLineButton_Click"
                             ToolTip="指定行へ移動">
-                        <TextBlock FontSize="12"
-                                   FontWeight="SemiBold"
-                                   Text="行"
+                        <TextBlock FontFamily="Segoe MDL2 Assets"
+                                   FontSize="14"
+                                   Text="&#xE1D3;"
                                    HorizontalAlignment="Center"
                                    VerticalAlignment="Center" />
                     </Button>

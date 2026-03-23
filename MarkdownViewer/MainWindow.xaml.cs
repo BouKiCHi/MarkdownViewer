@@ -155,12 +155,24 @@ public partial class MainWindow : Window {
   }
 
   private void CoreWebView2_NavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs e) {
+    var documentTab = GetDocumentTabByCoreWebView2(sender as CoreWebView2);
+    if(documentTab is not null && TryHandleLocalNavigation(documentTab, e.Uri)) {
+      e.Cancel = true;
+      return;
+    }
+
     if(TryOpenExternalUrl(e.Uri)) {
       e.Cancel = true;
     }
   }
 
   private void CoreWebView2_NewWindowRequested(object? sender, CoreWebView2NewWindowRequestedEventArgs e) {
+    var documentTab = GetDocumentTabByCoreWebView2(sender as CoreWebView2);
+    if(documentTab is not null && TryHandleLocalNavigation(documentTab, e.Uri)) {
+      e.Handled = true;
+      return;
+    }
+
     if(TryOpenExternalUrl(e.Uri)) {
       e.Handled = true;
     }
@@ -188,6 +200,73 @@ public partial class MainWindow : Window {
       return true;
     } catch {
       return false;
+    }
+  }
+
+  private bool TryHandleLocalNavigation(MarkdownDocumentTab documentTab, string? url) {
+    if(string.IsNullOrWhiteSpace(url) || !Uri.TryCreate(url, UriKind.Absolute, out var uri)) {
+      return false;
+    }
+
+    if(uri.Scheme is "http" or "https") {
+      if(string.Equals(uri.Host, AssetHostName, StringComparison.OrdinalIgnoreCase)) {
+        return false;
+      }
+
+      if(!string.Equals(uri.Host, VirtualHostName, StringComparison.OrdinalIgnoreCase)) {
+        return false;
+      }
+    } else if(!string.Equals(uri.Scheme, Uri.UriSchemeFile, StringComparison.OrdinalIgnoreCase)) {
+      return false;
+    }
+
+    var localPath = ResolveLocalNavigationPath(documentTab.FullPath, uri);
+    if(string.IsNullOrWhiteSpace(localPath)) {
+      return false;
+    }
+
+    if(IsMarkdownPath(localPath)) {
+      OpenMarkdownFile(localPath, HistoryUpdateMode.AddOrMove, focusDisplay: true);
+      return true;
+    }
+
+    if(File.Exists(localPath) || Directory.Exists(localPath)) {
+      try {
+        Process.Start(new ProcessStartInfo(localPath) { UseShellExecute = true });
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
+    return false;
+  }
+
+  private static string? ResolveLocalNavigationPath(string sourceFilePath, Uri uri) {
+    try {
+      if(string.Equals(uri.Scheme, Uri.UriSchemeFile, StringComparison.OrdinalIgnoreCase)) {
+        var localPath = uri.LocalPath;
+        return string.IsNullOrWhiteSpace(localPath) ? null : Path.GetFullPath(localPath);
+      }
+
+      if(!string.Equals(uri.Host, VirtualHostName, StringComparison.OrdinalIgnoreCase)) {
+        return null;
+      }
+
+      var relativePath = Uri.UnescapeDataString(uri.AbsolutePath).TrimStart('/');
+      if(string.IsNullOrWhiteSpace(relativePath)) {
+        return null;
+      }
+
+      var baseDirectory = Path.GetDirectoryName(sourceFilePath);
+      if(string.IsNullOrWhiteSpace(baseDirectory)) {
+        return null;
+      }
+
+      var normalizedRelativePath = relativePath.Replace('/', Path.DirectorySeparatorChar);
+      return Path.GetFullPath(Path.Combine(baseDirectory, normalizedRelativePath));
+    } catch {
+      return null;
     }
   }
 
@@ -1859,6 +1938,14 @@ p { color: #555; }
     return openDocuments.Values.FirstOrDefault(documentTab => ReferenceEquals(documentTab.LayoutDocument, activeLayoutDocument));
   }
 
+  private MarkdownDocumentTab? GetDocumentTabByCoreWebView2(CoreWebView2? coreWebView) {
+    if(coreWebView is null) {
+      return null;
+    }
+
+    return openDocuments.Values.FirstOrDefault(tab => ReferenceEquals(tab.WebView.CoreWebView2, coreWebView));
+  }
+
   private void UpdateWindowForActiveDocument() {
     var activeDocument = GetActiveDocumentTab();
     if(activeDocument is null) {
@@ -2092,7 +2179,7 @@ p { color: #555; }
       return;
     }
 
-    var documentTab = openDocuments.Values.FirstOrDefault(tab => ReferenceEquals(tab.WebView.CoreWebView2, coreWebView));
+    var documentTab = GetDocumentTabByCoreWebView2(coreWebView);
     if(documentTab is null) {
       Debug.WriteLine($"[MarkdownViewer] NavigationCompleted. Untracked WebView. Success={e.IsSuccess} Status={e.WebErrorStatus}");
       return;
