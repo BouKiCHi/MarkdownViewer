@@ -61,6 +61,15 @@
             </Border>
         </DataTemplate>
 
+        <DataTemplate x:Key="DocumentHeaderTemplate">
+            <Border Padding="16,4">
+                <TextBlock Text="{Binding Title}"
+                           TextAlignment="Center"
+                           HorizontalAlignment="Center"
+                           TextTrimming="CharacterEllipsis" />
+            </Border>
+        </DataTemplate>
+
         <Style x:Key="OutlineListBoxItemStyle"
                TargetType="ListBoxItem">
             <Setter Property="HorizontalContentAlignment"
@@ -243,6 +252,7 @@
 
         <ad:DockingManager Grid.Row="1"
                                x:Name="MainDockingManager"
+                               DocumentHeaderTemplate="{StaticResource DocumentHeaderTemplate}"
                                ActiveContentChanged="MainDockingManager_ActiveContentChanged"
                                DocumentClosed="MainDockingManager_DocumentClosed">
                 <ad:DockingManager.DocumentContextMenu>
