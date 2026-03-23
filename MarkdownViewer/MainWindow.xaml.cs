@@ -28,6 +28,7 @@ public partial class MainWindow : Window {
   private const string ReleasePageUrl = "https://github.com/BouKiCHi/MarkdownViewer/releases";
   private static readonly RoutedCommand ToggleHistoryPaneCommand = new();
   private static readonly RoutedCommand ReloadMarkdownCommand = new();
+  private static readonly RoutedCommand GoToLineCommand = new();
 
   private readonly SettingRepository settingRepository = new();
   private readonly ObservableCollection<HistoryItem> historyItems = [];
@@ -44,6 +45,9 @@ public partial class MainWindow : Window {
   private HistoryItem? draggedHistoryItem;
   private HistoryItem? dropIndicatorItem;
   private bool dropIndicatorAfter;
+  private string? currentDirectoryItemsPath;
+  private DirectoryFileSortMode currentDirectoryFileSortMode = DirectoryFileSortMode.LastWriteTimeDescending;
+  private bool suppressDirectoryFileSortSelectionChanged;
 
   private enum HistoryUpdateMode {
     None,
@@ -56,6 +60,11 @@ public partial class MainWindow : Window {
     Source
   }
 
+  private enum DirectoryFileSortMode {
+    FileNameAscending,
+    LastWriteTimeDescending
+  }
+
   private ViewMode currentViewMode = ViewMode.Preview;
 
   public MainWindow(string? initialFilePath) {
@@ -64,8 +73,10 @@ public partial class MainWindow : Window {
 
     CommandBindings.Add(new CommandBinding(ToggleHistoryPaneCommand, ToggleHistoryPaneCommand_Executed));
     CommandBindings.Add(new CommandBinding(ReloadMarkdownCommand, ReloadMarkdownCommand_Executed));
+    CommandBindings.Add(new CommandBinding(GoToLineCommand, GoToLineCommand_Executed));
     InputBindings.Add(new KeyBinding(ToggleHistoryPaneCommand, new KeyGesture(Key.B, ModifierKeys.Control)));
     InputBindings.Add(new KeyBinding(ReloadMarkdownCommand, new KeyGesture(Key.R, ModifierKeys.Control)));
+    InputBindings.Add(new KeyBinding(GoToLineCommand, new KeyGesture(Key.G, ModifierKeys.Control)));
     HistoryListBox.ItemsSource = historyItems;
     DirectoryFileListBox.ItemsSource = directoryFileItems;
     OutlineListBox.ItemsSource = outlineItems;
@@ -272,6 +283,14 @@ public partial class MainWindow : Window {
     MessageBox.Show($"リリースページを開けませんでした。{Environment.NewLine}{ReleasePageUrl}", "Markdown Viewer", MessageBoxButton.OK, MessageBoxImage.Error);
   }
 
+  private void FilesSortComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e) {
+    if(suppressDirectoryFileSortSelectionChanged || sender is not ComboBox comboBox || comboBox.SelectedItem is not ComboBoxItem selectedItem) {
+      return;
+    }
+
+    SetDirectoryFileSortMode(ParseDirectoryFileSortMode(selectedItem.Tag as string));
+  }
+
   private void CloseDocumentsToRightMenuItem_Click(object sender, RoutedEventArgs e) {
     var targetDocument = GetLayoutDocumentFromMenuSender(sender);
     var documentPane = targetDocument?.Parent as LayoutDocumentPane ?? GetDocumentPane();
@@ -339,6 +358,14 @@ public partial class MainWindow : Window {
     await RenderMarkdownFileAsync(activeDocument);
   }
 
+  private async void GoToLineButton_Click(object sender, RoutedEventArgs e) {
+    await OpenGoToLineDialogAsync();
+  }
+
+  private async void GoToLineCommand_Executed(object sender, ExecutedRoutedEventArgs e) {
+    await OpenGoToLineDialogAsync();
+  }
+
   private void HistoryListBox_SelectionChanged(object sender, SelectionChangedEventArgs e) {
     if(suppressHistorySelectionChanged || HistoryListBox!.SelectedItems.Count != 1 || HistoryListBox.SelectedItem is not HistoryItem selected) {
       return;
@@ -363,26 +390,28 @@ public partial class MainWindow : Window {
     }
   }
 
-  private void DirectoryFileListBox_SelectionChanged(object sender, SelectionChangedEventArgs e) {
-    if(sender is not ListBox listBox || listBox.SelectedItem is not DirectoryFileItem selectedItem) {
-      return;
-    }
-
-    try {
-      if(selectedItem.IsMarkdownFile) {
-        OpenMarkdownFile(selectedItem.FullPath, HistoryUpdateMode.AddOrMove, focusDisplay: true);
-      }
-    } finally {
-      listBox.SelectedItem = null;
-    }
-  }
-
   private void DirectoryFileListBoxItem_Loaded(object sender, RoutedEventArgs e) {
     if(sender is not ListBoxItem item) {
       return;
     }
 
     item.ContextMenu ??= BuildDirectoryFileItemContextMenu();
+  }
+
+  private void DirectoryFileListBoxItem_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e) {
+    if(sender is not ListBoxItem item || item.DataContext is not DirectoryFileItem selectedItem) {
+      return;
+    }
+
+    e.Handled = true;
+    DirectoryFileListBox!.SelectedItem = selectedItem;
+    item.Focus();
+
+    if(selectedItem.IsMarkdownFile) {
+      OpenMarkdownFile(selectedItem.FullPath, HistoryUpdateMode.AddOrMove, focusDisplay: true);
+    }
+
+    DirectoryFileListBox.SelectedItem = null;
   }
 
   private void DirectoryFileListBoxItem_PreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e) {
@@ -1030,38 +1059,90 @@ p { color: #555; }
       baseElement.href = baseUri;
       document.head.appendChild(baseElement);
 
-      marked.use({
-        renderer: {
-          code(codeInfo) {
-            const lang = (codeInfo.lang || '').toLowerCase();
-            const text = codeInfo.text || '';
-
-            if (lang === 'mermaid') {
-              const encodedMermaid = text
-                .replaceAll('&', '&amp;')
-                .replaceAll('<', '&lt;')
-                .replaceAll('>', '&gt;');
-              return '<pre class="language-mermaid">' + encodedMermaid + '</pre>';
-            }
-
-            const encoded = text
-              .replaceAll('&', '&amp;')
-              .replaceAll('<', '&lt;')
-              .replaceAll('>', '&gt;');
-            const className = lang ? `language-${lang}` : 'language-none';
-            return `<pre class="line-numbers"><code class="${className}">${encoded}</code></pre>`;
-          }
+      const countLines = (value) => ((value || '').match(/\n/g) || []).length;
+      const withSourceLine = (html, lineNumber) => {
+        if (!lineNumber) {
+          return html;
         }
-      });
 
-      marked.setOptions({ breaks: true });
-      const html = marked.parse(markdown);
+        return html.replace(/<([a-z0-9-]+)/i, `<$1 data-source-line="${lineNumber}"`);
+      };
+      const annotateTopLevelSourceLines = (tokens) => {
+        let currentLine = 1;
+        for (const token of tokens) {
+          token._mdvSourceLine = currentLine;
+          currentLine += countLines(token.raw);
+        }
+      };
+
+      const renderer = new marked.Renderer();
+      const defaultCodeRenderer = renderer.code;
+      const defaultParagraphRenderer = renderer.paragraph;
+      const defaultHeadingRenderer = renderer.heading;
+      const defaultBlockquoteRenderer = renderer.blockquote;
+      const defaultListRenderer = renderer.list;
+      const defaultListItemRenderer = renderer.listitem;
+      const defaultTableRenderer = renderer.table;
+      const defaultHtmlRenderer = renderer.html;
+      const defaultHrRenderer = renderer.hr;
+
+      renderer.code = function(codeInfo) {
+        const lang = (codeInfo.lang || '').toLowerCase();
+        const text = codeInfo.text || '';
+
+        if (lang === 'mermaid') {
+          const encodedMermaid = text
+            .replaceAll('&', '&amp;')
+            .replaceAll('<', '&lt;')
+            .replaceAll('>', '&gt;');
+          return withSourceLine('<pre class="language-mermaid">' + encodedMermaid + '</pre>', codeInfo._mdvSourceLine);
+        }
+
+        const encoded = text
+          .replaceAll('&', '&amp;')
+          .replaceAll('<', '&lt;')
+          .replaceAll('>', '&gt;');
+        const className = lang ? `language-${lang}` : 'language-none';
+        return withSourceLine(`<pre class="line-numbers"><code class="${className}">${encoded}</code></pre>`, codeInfo._mdvSourceLine);
+      };
+      renderer.paragraph = function(token) {
+        return withSourceLine(defaultParagraphRenderer.call(this, token), token._mdvSourceLine);
+      };
+      renderer.heading = function(token) {
+        return withSourceLine(defaultHeadingRenderer.call(this, token), token._mdvSourceLine);
+      };
+      renderer.blockquote = function(token) {
+        return withSourceLine(defaultBlockquoteRenderer.call(this, token), token._mdvSourceLine);
+      };
+      renderer.list = function(token) {
+        return withSourceLine(defaultListRenderer.call(this, token), token._mdvSourceLine);
+      };
+      renderer.listitem = function(token) {
+        return withSourceLine(defaultListItemRenderer.call(this, token), token._mdvSourceLine);
+      };
+      renderer.table = function(token) {
+        return withSourceLine(defaultTableRenderer.call(this, token), token._mdvSourceLine);
+      };
+      renderer.html = function(token) {
+        return withSourceLine(defaultHtmlRenderer.call(this, token), token._mdvSourceLine);
+      };
+      renderer.hr = function(token) {
+        return withSourceLine(defaultHrRenderer.call(this, token), token._mdvSourceLine);
+      };
+
+      marked.setOptions({
+        breaks: true,
+        renderer
+      });
+      const tokens = marked.lexer(markdown);
+      annotateTopLevelSourceLines(tokens);
+      const html = marked.parser(tokens);
       const renderedHtml = isUnsafeHtmlEnabled
         ? html
         : DOMPurify.sanitize(html, {
             USE_PROFILES: { html: true },
             ALLOW_DATA_ATTR: false,
-            ADD_ATTR: ['class', 'target', 'rel', 'aria-hidden']
+            ADD_ATTR: ['class', 'target', 'rel', 'aria-hidden', 'data-source-line']
           });
       document.getElementById('main').innerHTML = renderedHtml;
 
@@ -1297,6 +1378,7 @@ p { color: #555; }
     settingRepository.Update(settings => {
       settings.History = localHistory;
       settings.IsHistoryPaneVisible = HistoryToggleButton!.IsChecked == true;
+      settings.DirectoryFileSortMode = currentDirectoryFileSortMode.ToString();
     });
   }
 
@@ -1317,10 +1399,12 @@ p { color: #555; }
 
     try {
       editorPath = EditorPathResolver.Resolve(settings.EditorPath);
+      currentDirectoryFileSortMode = ParseDirectoryFileSortMode(settings.DirectoryFileSortMode);
       ApplyHistoryPaneVisibility(settings.IsHistoryPaneVisible);
       UpdateHistoryToggleState();
       UnsafeHtmlToggleButton!.IsChecked = isUnsafeHtmlEnabled;
       UpdateUnsafeHtmlToggleAppearance();
+      UpdateDirectoryFileSortMenuChecks();
 
       var currentSelectionPath = (HistoryListBox!.SelectedItem as HistoryItem)?.FullPath;
       var existingPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -1508,6 +1592,111 @@ p { color: #555; }
     activeDocument.SourceTextBox.ScrollToLine(lineIndex);
   }
 
+  private async Task OpenGoToLineDialogAsync() {
+    var activeDocument = GetActiveDocumentTab();
+    if(activeDocument is null) {
+      return;
+    }
+
+    var lineCount = GetDocumentLineCount(activeDocument);
+    var currentLineNumber = GetCurrentLineNumber(activeDocument);
+    var dialog = new GoToLineWindow(lineCount, currentLineNumber) {
+      Owner = this
+    };
+
+    if(dialog.ShowDialog() != true || dialog.SelectedLineNumber is not int lineNumber) {
+      return;
+    }
+
+    await GoToDocumentLineAsync(activeDocument, lineNumber);
+  }
+
+  private async Task GoToDocumentLineAsync(MarkdownDocumentTab documentTab, int lineNumber) {
+    var lineIndex = Math.Clamp(lineNumber - 1, 0, Math.Max(0, GetDocumentLineCount(documentTab) - 1));
+
+    ActivateDocumentTab(documentTab, focusDisplay: true);
+
+    if(currentViewMode == ViewMode.Preview) {
+      await ScrollPreviewToLineAsync(documentTab, lineNumber);
+      return;
+    }
+
+    var characterIndex = documentTab.SourceTextBox.GetCharacterIndexFromLineIndex(lineIndex);
+    if(characterIndex < 0) {
+      return;
+    }
+
+    documentTab.SourceTextBox.Focus();
+    documentTab.SourceTextBox.CaretIndex = characterIndex;
+    documentTab.SourceTextBox.SelectionLength = 0;
+    documentTab.SourceTextBox.ScrollToLine(lineIndex);
+  }
+
+  private static async Task ScrollPreviewToLineAsync(MarkdownDocumentTab documentTab, int lineNumber) {
+    if(documentTab.WebView.CoreWebView2 is null) {
+      return;
+    }
+
+    await documentTab.WebView.CoreWebView2.ExecuteScriptAsync($$"""
+(() => {
+  const targetLine = {{lineNumber}};
+  const candidates = Array.from(document.querySelectorAll('[data-source-line]'))
+    .map(element => ({
+      element,
+      line: Number.parseInt(element.getAttribute('data-source-line') || '', 10)
+    }))
+    .filter(item => Number.isFinite(item.line));
+
+  if (candidates.length === 0) {
+    return false;
+  }
+
+  let target = candidates[0];
+  for (const candidate of candidates) {
+    if (candidate.line <= targetLine) {
+      target = candidate;
+      continue;
+    }
+
+    if (target.line <= targetLine) {
+      break;
+    }
+
+    if (candidate.line < target.line) {
+      target = candidate;
+    }
+  }
+
+  target.element.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  return true;
+})()
+""");
+  }
+
+  private static int GetDocumentLineCount(MarkdownDocumentTab documentTab) {
+    if(string.IsNullOrEmpty(documentTab.SourceText)) {
+      return 1;
+    }
+
+    var lineCount = 1;
+    foreach(var character in documentTab.SourceText) {
+      if(character == '\n') {
+        lineCount++;
+      }
+    }
+
+    return lineCount;
+  }
+
+  private static int GetCurrentLineNumber(MarkdownDocumentTab documentTab) {
+    if(documentTab.SourceTextBox.LineCount <= 0) {
+      return 1;
+    }
+
+    var currentLineIndex = documentTab.SourceTextBox.GetLineIndexFromCharacterIndex(documentTab.SourceTextBox.CaretIndex);
+    return Math.Clamp(currentLineIndex + 1, 1, documentTab.SourceTextBox.LineCount);
+  }
+
   private MarkdownDocumentTab? GetOrCreateDocumentTab(string fullPath) {
     if(openDocuments.TryGetValue(fullPath, out var existingDocument)) {
       DebugLog(existingDocument, "GetOrCreateDocumentTab found existing document.");
@@ -1674,6 +1863,7 @@ p { color: #555; }
     var activeDocument = GetActiveDocumentTab();
     if(activeDocument is null) {
       directoryFileItems.Clear();
+      currentDirectoryItemsPath = null;
       outlineItems.Clear();
       PathTextBlock.Text = string.Empty;
       PathTextBlock.Foreground = new SolidColorBrush(Color.FromRgb(68, 68, 68));
@@ -1754,7 +1944,7 @@ p { color: #555; }
     }
 
     DetachElementFromParent(HistoryListBox);
-    DetachElementFromParent(DirectoryFileListBox);
+    DetachElementFromParent(FilesPaneContentRoot);
     DetachElementFromParent(OutlineListBox);
 
     foreach(var document in openDocuments.Values) {
@@ -1828,8 +2018,9 @@ p { color: #555; }
         e.Content = HistoryListBox;
         break;
       case LayoutAnchorable anchorable when string.Equals(anchorable.ContentId, "FilesPane", StringComparison.Ordinal):
-        DetachElementFromParent(DirectoryFileListBox);
-        e.Content = DirectoryFileListBox;
+        // FilesPane restores the whole root so the sort header stays attached with the list.
+        DetachElementFromParent(FilesPaneContentRoot);
+        e.Content = FilesPaneContentRoot;
         break;
       case LayoutAnchorable anchorable when string.Equals(anchorable.ContentId, "OutlinePane", StringComparison.Ordinal):
         anchorable.PropertyChanged -= OutlineAnchorable_PropertyChanged;
@@ -1869,6 +2060,7 @@ p { color: #555; }
       settings.IsHistoryPaneVisible = HistoryToggleButton!.IsChecked == true;
       settings.DockLayoutXml = dockLayoutXml;
       settings.DockLayoutVersion = CurrentDockLayoutVersion;
+      settings.DirectoryFileSortMode = currentDirectoryFileSortMode.ToString();
     });
   }
 
@@ -2017,24 +2209,88 @@ p { color: #555; }
   }
 
   private void RefreshDirectoryFileItems(string fullPath) {
-    directoryFileItems.Clear();
-
     var directoryPath = Path.GetDirectoryName(fullPath);
     if(string.IsNullOrWhiteSpace(directoryPath) || !Directory.Exists(directoryPath)) {
+      directoryFileItems.Clear();
+      currentDirectoryItemsPath = null;
       return;
     }
 
-    IEnumerable<string> entries;
+    IReadOnlyList<string> orderedEntries;
     try {
-      entries = Directory.EnumerateFileSystemEntries(directoryPath);
+      var markdownEntries = Directory.EnumerateFileSystemEntries(directoryPath)
+        .Where(path => File.Exists(path) && IsMarkdownPath(path))
+        .Select(Path.GetFullPath);
+
+      orderedEntries = currentDirectoryFileSortMode switch {
+        DirectoryFileSortMode.FileNameAscending => markdownEntries
+          .OrderBy(path => Path.GetFileName(path), StringComparer.OrdinalIgnoreCase)
+          .ThenBy(path => path, StringComparer.OrdinalIgnoreCase)
+          .ToArray(),
+        _ => markdownEntries
+          .OrderByDescending(GetFileLastWriteTimeUtcSafe)
+          .ThenBy(path => Path.GetFileName(path), StringComparer.OrdinalIgnoreCase)
+          .ToArray()
+      };
     } catch {
       return;
     }
 
-    foreach(var entry in entries
-      .Where(path => File.Exists(path) && IsMarkdownPath(path))
-      .OrderBy(path => Path.GetFileName(path), StringComparer.OrdinalIgnoreCase)) {
-      directoryFileItems.Add(new DirectoryFileItem(entry, fullPath));
+    var activeFullPath = Path.GetFullPath(fullPath);
+    var canReuseItems = string.Equals(currentDirectoryItemsPath, directoryPath, StringComparison.OrdinalIgnoreCase)
+      && orderedEntries.Count == directoryFileItems.Count
+      && orderedEntries.SequenceEqual(directoryFileItems.Select(item => item.FullPath), StringComparer.OrdinalIgnoreCase);
+
+    if(canReuseItems) {
+      foreach(var item in directoryFileItems) {
+        item.IsActiveDocument = string.Equals(item.FullPath, activeFullPath, StringComparison.OrdinalIgnoreCase);
+      }
+
+      return;
+    }
+
+    directoryFileItems.Clear();
+    currentDirectoryItemsPath = directoryPath;
+
+    foreach(var entry in orderedEntries) {
+      directoryFileItems.Add(new DirectoryFileItem(entry, activeFullPath));
+    }
+  }
+
+  private void SetDirectoryFileSortMode(DirectoryFileSortMode sortMode) {
+    if(currentDirectoryFileSortMode == sortMode) {
+      UpdateDirectoryFileSortMenuChecks();
+      return;
+    }
+
+    currentDirectoryFileSortMode = sortMode;
+    currentDirectoryItemsPath = null;
+    UpdateDirectoryFileSortMenuChecks();
+    SaveHistory();
+    if(GetActiveDocumentTab() is { } activeDocument) {
+      RefreshDirectoryFileItems(activeDocument.FullPath);
+    }
+  }
+
+  private void UpdateDirectoryFileSortMenuChecks() {
+    if(FilesSortComboBox is not null) {
+      suppressDirectoryFileSortSelectionChanged = true;
+      FilesSortComboBox.SelectedIndex = currentDirectoryFileSortMode == DirectoryFileSortMode.LastWriteTimeDescending ? 0 : 1;
+      suppressDirectoryFileSortSelectionChanged = false;
+    }
+  }
+
+  private static DirectoryFileSortMode ParseDirectoryFileSortMode(string? value) {
+    return Enum.TryParse<DirectoryFileSortMode>(value, ignoreCase: true, out var sortMode)
+      ? sortMode
+      : DirectoryFileSortMode.LastWriteTimeDescending;
+  }
+
+  private static DateTime GetFileLastWriteTimeUtcSafe(string fullPath) {
+    try {
+      return File.GetLastWriteTimeUtc(fullPath);
+    } catch {
+      return DateTime.MinValue;
     }
   }
 
@@ -2094,35 +2350,38 @@ p { color: #555; }
     public event PropertyChangedEventHandler? PropertyChanged;
   }
 
-  private sealed class DirectoryFileItem {
+  private sealed class DirectoryFileItem : INotifyPropertyChanged {
+    private bool isActiveDocument;
+
     public DirectoryFileItem(string fullPath, string activeDocumentPath) {
-      FullPath = fullPath;
+      FullPath = Path.GetFullPath(fullPath);
       IsMarkdownFile = IsMarkdownPath(fullPath);
-      IsActiveDocument = string.Equals(Path.GetFullPath(fullPath), Path.GetFullPath(activeDocumentPath), StringComparison.OrdinalIgnoreCase);
-
-      var fileName = Path.GetFileName(fullPath);
-      DisplayName = fileName;
-
-      if(IsActiveDocument) {
-        SecondaryText = "現在表示中";
-      } else if(IsMarkdownFile) {
-        SecondaryText = "Markdown";
-      } else {
-        SecondaryText = Path.GetExtension(fullPath);
-      }
+      isActiveDocument = string.Equals(FullPath, Path.GetFullPath(activeDocumentPath), StringComparison.OrdinalIgnoreCase);
+      DisplayName = Path.GetFileName(fullPath);
     }
 
     public string DisplayName { get; }
 
     public string FullPath { get; }
 
-    public string SecondaryText { get; }
-
     public bool IsMarkdownFile { get; }
 
-    public bool IsActiveDocument { get; }
+    public bool IsActiveDocument {
+      get => isActiveDocument;
+      set {
+        if(isActiveDocument == value) {
+          return;
+        }
 
-    public Visibility SecondaryTextVisibility => string.IsNullOrWhiteSpace(SecondaryText) ? Visibility.Collapsed : Visibility.Visible;
+        isActiveDocument = value;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsActiveDocument)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ActiveIndicatorVisibility)));
+      }
+    }
+
+    public Visibility ActiveIndicatorVisibility => IsActiveDocument ? Visibility.Visible : Visibility.Collapsed;
+
+    public event PropertyChangedEventHandler? PropertyChanged;
   }
 
   private static bool IsMarkdownPath(string fullPath) {

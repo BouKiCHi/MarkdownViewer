@@ -128,4 +128,5 @@ public sealed class AppSettings {
   public bool IsHistoryPaneVisible { get; set; } = true;
   public string EditorPath { get; set; } = string.Empty;
   public string DockLayoutXml { get; set; } = string.Empty;
+  public string DirectoryFileSortMode { get; set; } = "LastWriteTimeDescending";
 }

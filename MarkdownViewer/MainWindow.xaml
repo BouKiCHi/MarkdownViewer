@@ -27,22 +27,37 @@
         </DataTemplate>
 
         <DataTemplate x:Key="DirectoryFileItemTemplate">
-            <Border Padding="6,4"
+            <Border Padding="6,3"
                     Background="Transparent">
-                <StackPanel>
-                    <TextBlock Text="{Binding DisplayName}"
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+
+                    <Border Grid.Column="0"
+                            Margin="0,0,6,0"
+                            Padding="5,1"
+                            VerticalAlignment="Center"
+                            Background="#E6F4EA"
+                            BorderBrush="#8CCB9B"
+                            BorderThickness="1"
+                            CornerRadius="8"
+                            Visibility="{Binding ActiveIndicatorVisibility}">
+                        <TextBlock Text="表示中"
+                                   FontSize="10"
+                                   FontWeight="SemiBold"
+                                   Foreground="#236A3B" />
+                    </Border>
+
+                    <TextBlock Grid.Column="1"
+                               Text="{Binding DisplayName}"
                                ToolTip="{Binding FullPath}"
                                TextTrimming="CharacterEllipsis"
                                FontSize="12"
-                               Foreground="#222" />
-                    <TextBlock Text="{Binding SecondaryText}"
-                               ToolTip="{Binding FullPath}"
-                               TextTrimming="CharacterEllipsis"
-                               FontSize="10"
-                               Foreground="#666"
-                               Margin="0,1,0,0"
-                               Visibility="{Binding SecondaryTextVisibility}" />
-                </StackPanel>
+                               Foreground="#222"
+                               VerticalAlignment="Center" />
+                </Grid>
             </Border>
         </DataTemplate>
 
@@ -62,6 +77,8 @@
                     Value="0" />
             <EventSetter Event="Loaded"
                          Handler="DirectoryFileListBoxItem_Loaded" />
+            <EventSetter Event="PreviewMouseLeftButtonDown"
+                         Handler="DirectoryFileListBoxItem_PreviewMouseLeftButtonDown" />
             <EventSetter Event="PreviewMouseRightButtonDown"
                          Handler="DirectoryFileListBoxItem_PreviewMouseRightButtonDown" />
         </Style>
@@ -129,11 +146,24 @@
                     <Button x:Name="ReloadButton"
                             Width="32"
                             Height="32"
+                            Margin="0,0,8,0"
                             Click="ReloadButton_Click"
                             ToolTip="再読み込み">
                         <TextBlock FontFamily="Segoe MDL2 Assets"
                                    FontSize="14"
                                    Text="&#xE72C;"
+                                   HorizontalAlignment="Center"
+                                   VerticalAlignment="Center" />
+                    </Button>
+
+                    <Button x:Name="GoToLineButton"
+                            Width="40"
+                            Height="32"
+                            Click="GoToLineButton_Click"
+                            ToolTip="指定行へ移動">
+                        <TextBlock FontSize="12"
+                                   FontWeight="SemiBold"
+                                   Text="行"
                                    HorizontalAlignment="Center"
                                    VerticalAlignment="Center" />
                     </Button>
@@ -316,12 +346,54 @@
                                                       CanDockAsTabbedDocument="False"
                                                       AutoHideWidth="220"
                                                       AutoHideHeight="280">
-                                    <Border Background="#FCFCFC">
-                                        <ListBox x:Name="DirectoryFileListBox"
-                                                 BorderThickness="0"
-                                                 ItemTemplate="{StaticResource DirectoryFileItemTemplate}"
-                                                 ItemContainerStyle="{StaticResource DirectoryFileListBoxItemStyle}"
-                                                 SelectionChanged="DirectoryFileListBox_SelectionChanged" />
+                                    <Border x:Name="FilesPaneContentRoot"
+                                            Background="#FCFCFC">
+                                        <Grid>
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="Auto" />
+                                                <RowDefinition Height="*" />
+                                            </Grid.RowDefinitions>
+
+                                            <Border Grid.Row="0"
+                                                    Margin="0"
+                                                    Padding="8,8,8,6"
+                                                    Background="#F6F7F8"
+                                                    BorderBrush="#E2E2E2"
+                                                    BorderThickness="0,0,0,1">
+                                                <Grid>
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="Auto" />
+                                                        <ColumnDefinition Width="*" />
+                                                    </Grid.ColumnDefinitions>
+
+                                                    <TextBlock Grid.Column="0"
+                                                               VerticalAlignment="Center"
+                                                               Margin="0,0,8,0"
+                                                               FontSize="11"
+                                                               Foreground="#555"
+                                                               Text="並び順" />
+
+                                                    <ComboBox x:Name="FilesSortComboBox"
+                                                              Grid.Column="1"
+                                                              MinWidth="120"
+                                                              Height="28"
+                                                              HorizontalAlignment="Stretch"
+                                                              VerticalContentAlignment="Center"
+                                                              SelectionChanged="FilesSortComboBox_SelectionChanged">
+                                                        <ComboBoxItem Tag="LastWriteTimeDescending"
+                                                                      Content="更新日時降順" />
+                                                        <ComboBoxItem Tag="FileNameAscending"
+                                                                      Content="ファイル名昇順" />
+                                                    </ComboBox>
+                                                </Grid>
+                                            </Border>
+
+                                            <ListBox x:Name="DirectoryFileListBox"
+                                                     Grid.Row="1"
+                                                     BorderThickness="0"
+                                                     ItemTemplate="{StaticResource DirectoryFileItemTemplate}"
+                                                     ItemContainerStyle="{StaticResource DirectoryFileListBoxItemStyle}" />
+                                        </Grid>
                                     </Border>
                                 </adl:LayoutAnchorable>
                             </adl:LayoutAnchorablePane>
