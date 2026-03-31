@@ -27,37 +27,34 @@
         </DataTemplate>
 
         <DataTemplate x:Key="DirectoryFileItemTemplate">
-            <Border Padding="6,3"
-                    Background="Transparent">
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto" />
-                        <ColumnDefinition Width="*" />
-                    </Grid.ColumnDefinitions>
-
-                    <Border Grid.Column="0"
-                            Margin="0,0,6,0"
-                            Padding="5,1"
-                            VerticalAlignment="Center"
-                            Background="#E6F4EA"
-                            BorderBrush="#8CCB9B"
-                            BorderThickness="1"
-                            CornerRadius="8"
-                            Visibility="{Binding ActiveIndicatorVisibility}">
-                        <TextBlock Text="表示中"
-                                   FontSize="10"
-                                   FontWeight="SemiBold"
-                                   Foreground="#236A3B" />
-                    </Border>
-
-                    <TextBlock Grid.Column="1"
-                               Text="{Binding DisplayName}"
+            <Border Padding="8,4"
+                    CornerRadius="6">
+                <Border.Style>
+                    <Style TargetType="Border">
+                        <Setter Property="Background"
+                                Value="Transparent" />
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding IsActiveDocument}"
+                                         Value="True">
+                                <Setter Property="Background"
+                                        Value="#E8F0FE" />
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Border.Style>
+                <StackPanel>
+                    <TextBlock Text="{Binding DisplayName}"
                                ToolTip="{Binding FullPath}"
                                TextTrimming="CharacterEllipsis"
                                FontSize="12"
-                               Foreground="#222"
-                               VerticalAlignment="Center" />
-                </Grid>
+                               Foreground="#222" />
+                    <TextBlock Text="{Binding LastUpdatedText}"
+                               ToolTip="{Binding FullPath}"
+                               TextTrimming="CharacterEllipsis"
+                               FontSize="10"
+                               Foreground="#666"
+                               Margin="0,1,0,0" />
+                </StackPanel>
             </Border>
         </DataTemplate>
 
@@ -101,10 +98,13 @@
 
         <Border Grid.Row="0"
                 x:Name="ToolbarBorder"
+                AllowDrop="True"
                 Padding="8"
                 BorderBrush="#D9D9D9"
                 BorderThickness="0,0,0,1"
-                Background="#F6F7F8">
+                Background="#F6F7F8"
+                DragOver="ToolbarBorder_DragOver"
+                Drop="ToolbarBorder_Drop">
             <Border.ContextMenu>
                 <ContextMenu x:Name="ToolbarContextMenu">
                     <MenuItem Header="設定"
@@ -371,30 +371,63 @@
                                                     BorderBrush="#E2E2E2"
                                                     BorderThickness="0,0,0,1">
                                                 <Grid>
-                                                    <Grid.ColumnDefinitions>
-                                                        <ColumnDefinition Width="Auto" />
-                                                        <ColumnDefinition Width="*" />
-                                                    </Grid.ColumnDefinitions>
+                                                    <Grid.RowDefinitions>
+                                                        <RowDefinition Height="Auto" />
+                                                        <RowDefinition Height="Auto" />
+                                                    </Grid.RowDefinitions>
 
-                                                    <TextBlock Grid.Column="0"
-                                                               VerticalAlignment="Center"
-                                                               Margin="0,0,8,0"
-                                                               FontSize="11"
-                                                               Foreground="#555"
-                                                               Text="並び順" />
+                                                    <Grid Grid.Row="0">
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="Auto" />
+                                                            <ColumnDefinition Width="*" />
+                                                        </Grid.ColumnDefinitions>
 
-                                                    <ComboBox x:Name="FilesSortComboBox"
-                                                              Grid.Column="1"
-                                                              MinWidth="120"
-                                                              Height="28"
-                                                              HorizontalAlignment="Stretch"
-                                                              VerticalContentAlignment="Center"
-                                                              SelectionChanged="FilesSortComboBox_SelectionChanged">
-                                                        <ComboBoxItem Tag="LastWriteTimeDescending"
-                                                                      Content="更新日時降順" />
-                                                        <ComboBoxItem Tag="FileNameAscending"
-                                                                      Content="ファイル名昇順" />
-                                                    </ComboBox>
+                                                        <TextBlock Grid.Column="0"
+                                                                   VerticalAlignment="Center"
+                                                                   Margin="0,0,8,0"
+                                                                   FontSize="11"
+                                                                   Foreground="#555"
+                                                                   Text="並び順" />
+
+                                                        <ComboBox x:Name="FilesSortComboBox"
+                                                                  Grid.Column="1"
+                                                                  MinWidth="120"
+                                                                  Height="28"
+                                                                  HorizontalAlignment="Stretch"
+                                                                  VerticalContentAlignment="Center"
+                                                                  SelectionChanged="FilesSortComboBox_SelectionChanged">
+                                                            <ComboBoxItem Tag="LastWriteTimeDescending"
+                                                                          Content="更新日時降順" />
+                                                            <ComboBoxItem Tag="FileNameAscending"
+                                                                          Content="ファイル名昇順" />
+                                                        </ComboBox>
+                                                    </Grid>
+
+                                                    <Grid Grid.Row="1"
+                                                          Margin="0,6,0,0">
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="*" />
+                                                            <ColumnDefinition Width="Auto" />
+                                                        </Grid.ColumnDefinitions>
+
+                                                        <TextBlock x:Name="CurrentDirectoryPathTextBlock"
+                                                                   Grid.Column="0"
+                                                                   FontSize="10"
+                                                                   Foreground="#666"
+                                                                   TextTrimming="CharacterEllipsis"
+                                                                   Cursor="Hand"
+                                                                   Background="Transparent"
+                                                                   MouseLeftButtonDown="CurrentDirectoryPathTextBlock_MouseLeftButtonDown" />
+
+                                                        <TextBlock x:Name="CurrentDirectoryPathCopiedTextBlock"
+                                                                   Grid.Column="1"
+                                                                   Margin="8,0,0,0"
+                                                                   FontSize="10"
+                                                                   FontWeight="SemiBold"
+                                                                   Foreground="#236A3B"
+                                                                   Text="コピーしました"
+                                                                   Visibility="Collapsed" />
+                                                    </Grid>
                                                 </Grid>
                                             </Border>
 

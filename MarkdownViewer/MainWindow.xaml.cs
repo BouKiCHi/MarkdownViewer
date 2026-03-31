@@ -48,6 +48,7 @@ public partial class MainWindow : Window {
   private string? currentDirectoryItemsPath;
   private DirectoryFileSortMode currentDirectoryFileSortMode = DirectoryFileSortMode.LastWriteTimeDescending;
   private bool suppressDirectoryFileSortSelectionChanged;
+  private int currentDirectoryPathFeedbackVersion;
 
   private enum HistoryUpdateMode {
     None,
@@ -639,6 +640,49 @@ public partial class MainWindow : Window {
     draggedHistoryItem = null;
     historyDragStartPoint = null;
     e.Handled = true;
+  }
+
+  private void ToolbarBorder_DragOver(object sender, DragEventArgs e) {
+    e.Effects = TryGetDroppedMarkdownPaths(e.Data).Count > 0
+      ? DragDropEffects.Copy
+      : DragDropEffects.None;
+    e.Handled = true;
+  }
+
+  private void ToolbarBorder_Drop(object sender, DragEventArgs e) {
+    var droppedPaths = TryGetDroppedMarkdownPaths(e.Data);
+    if(droppedPaths.Count == 0) {
+      e.Handled = true;
+      return;
+    }
+
+    InsertHistoryItems(droppedPaths, historyItems.Count);
+    OpenMarkdownFile(droppedPaths[0], HistoryUpdateMode.None, focusDisplay: true);
+    e.Handled = true;
+  }
+
+  private async void CurrentDirectoryPathTextBlock_MouseLeftButtonDown(object sender, MouseButtonEventArgs e) {
+    var directoryPath = GetActiveDocumentTab() is { } activeDocument
+      ? Path.GetDirectoryName(activeDocument.FullPath)
+      : null;
+    if(string.IsNullOrWhiteSpace(directoryPath)) {
+      return;
+    }
+
+    e.Handled = true;
+
+    try {
+      Clipboard.SetText(directoryPath);
+      var feedbackVersion = ++currentDirectoryPathFeedbackVersion;
+      CurrentDirectoryPathCopiedTextBlock.Visibility = Visibility.Visible;
+      await Task.Delay(1200);
+      if(feedbackVersion == currentDirectoryPathFeedbackVersion) {
+        CurrentDirectoryPathCopiedTextBlock.Visibility = Visibility.Collapsed;
+      }
+    } catch(Exception ex) {
+      CurrentDirectoryPathCopiedTextBlock.Visibility = Visibility.Collapsed;
+      MessageBox.Show($"パスをコピーできませんでした。{Environment.NewLine}{ex.Message}", "Markdown Viewer", MessageBoxButton.OK, MessageBoxImage.Error);
+    }
   }
 
   private void OpenInExplorerMenuItem_Click(object sender, RoutedEventArgs e) {
@@ -1952,7 +1996,11 @@ p { color: #555; }
       directoryFileItems.Clear();
       currentDirectoryItemsPath = null;
       outlineItems.Clear();
+      CurrentDirectoryPathTextBlock.Text = string.Empty;
+      CurrentDirectoryPathTextBlock.ToolTip = null;
+      CurrentDirectoryPathCopiedTextBlock.Visibility = Visibility.Collapsed;
       PathTextBlock.Text = string.Empty;
+      PathTextBlock.ToolTip = null;
       PathTextBlock.Foreground = new SolidColorBrush(Color.FromRgb(68, 68, 68));
       suppressHistorySelectionChanged = true;
       HistoryListBox!.SelectedItem = null;
@@ -1967,7 +2015,12 @@ p { color: #555; }
       outlineItems.Add(item);
     }
 
+    var currentDirectoryPath = Path.GetDirectoryName(activeDocument.FullPath) ?? string.Empty;
+    CurrentDirectoryPathTextBlock.Text = GetDirectoryDisplayName(currentDirectoryPath);
+    CurrentDirectoryPathTextBlock.ToolTip = BuildCurrentDirectoryPathToolTip(currentDirectoryPath);
+    CurrentDirectoryPathCopiedTextBlock.Visibility = Visibility.Collapsed;
     PathTextBlock.Text = Path.GetFileName(activeDocument.FullPath);
+    PathTextBlock.ToolTip = activeDocument.FullPath;
     PathTextBlock.Foreground = new SolidColorBrush(Color.FromRgb(68, 68, 68));
     SelectHistoryItem(activeDocument.FullPath);
     UpdateOutlineLayoutButtonAppearance();
@@ -2331,6 +2384,7 @@ p { color: #555; }
     if(canReuseItems) {
       foreach(var item in directoryFileItems) {
         item.IsActiveDocument = string.Equals(item.FullPath, activeFullPath, StringComparison.OrdinalIgnoreCase);
+        item.RefreshMetadata();
       }
 
       return;
@@ -2379,6 +2433,26 @@ p { color: #555; }
     } catch {
       return DateTime.MinValue;
     }
+  }
+
+  private static string? BuildCurrentDirectoryPathToolTip(string? directoryPath) {
+    return string.IsNullOrWhiteSpace(directoryPath)
+      ? null
+      : $"{directoryPath}{Environment.NewLine}クリックでパスをコピー";
+  }
+
+  private static string GetDirectoryDisplayName(string? directoryPath) {
+    if(string.IsNullOrWhiteSpace(directoryPath)) {
+      return string.Empty;
+    }
+
+    var trimmedPath = directoryPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+    if(string.IsNullOrWhiteSpace(trimmedPath)) {
+      return directoryPath;
+    }
+
+    var directoryName = Path.GetFileName(trimmedPath);
+    return string.IsNullOrWhiteSpace(directoryName) ? trimmedPath : directoryName;
   }
 
   private sealed class HistoryItem : INotifyPropertyChanged {
@@ -2439,12 +2513,14 @@ p { color: #555; }
 
   private sealed class DirectoryFileItem : INotifyPropertyChanged {
     private bool isActiveDocument;
+    private string lastUpdatedText = string.Empty;
 
     public DirectoryFileItem(string fullPath, string activeDocumentPath) {
       FullPath = Path.GetFullPath(fullPath);
       IsMarkdownFile = IsMarkdownPath(fullPath);
       isActiveDocument = string.Equals(FullPath, Path.GetFullPath(activeDocumentPath), StringComparison.OrdinalIgnoreCase);
       DisplayName = Path.GetFileName(fullPath);
+      RefreshMetadata();
     }
 
     public string DisplayName { get; }
@@ -2452,6 +2528,18 @@ p { color: #555; }
     public string FullPath { get; }
 
     public bool IsMarkdownFile { get; }
+
+    public string LastUpdatedText {
+      get => lastUpdatedText;
+      private set {
+        if(string.Equals(lastUpdatedText, value, StringComparison.Ordinal)) {
+          return;
+        }
+
+        lastUpdatedText = value;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(LastUpdatedText)));
+      }
+    }
 
     public bool IsActiveDocument {
       get => isActiveDocument;
@@ -2462,11 +2550,21 @@ p { color: #555; }
 
         isActiveDocument = value;
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsActiveDocument)));
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ActiveIndicatorVisibility)));
       }
     }
 
-    public Visibility ActiveIndicatorVisibility => IsActiveDocument ? Visibility.Visible : Visibility.Collapsed;
+    public void RefreshMetadata() {
+      LastUpdatedText = BuildLastUpdatedText(FullPath);
+    }
+
+    private static string BuildLastUpdatedText(string fullPath) {
+      try {
+        var lastWriteTime = File.GetLastWriteTime(fullPath);
+        return $"更新: {lastWriteTime:yyyy/MM/dd HH:mm}";
+      } catch {
+        return "更新日時不明";
+      }
+    }
 
     public event PropertyChangedEventHandler? PropertyChanged;
   }
